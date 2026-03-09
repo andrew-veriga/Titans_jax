@@ -1,3 +1,7 @@
-pytorch-fast-transformers>=0.4.0
-torch
+jax
+jaxlib
+flax
+optax
 einops
+einx
+typing_extensions
