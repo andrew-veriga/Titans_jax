@@ -18,8 +18,9 @@ from gemma.gm.utils import _jax_utils
 from gemma.gm.utils import _dtype_params
 from gemma.gm.vision import _token_utils
 from kauldron.typing import Bool, Float, Int, UInt8
-from kauldron import kd
-kd.typing.enable_kd_type_checking(False) # Correct way to disable type checks
+import os
+os.environ['KAULDRON_TYPECHECK'] = '0'
+os.environ['KD_CHECK_TYPES'] = '0'
 
 # Import the existing Neural Memory from the project
 from titans import NeuralMemory, init_memory_state
