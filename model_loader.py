@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
-from gemma.gm.ckpts import _orbax_utils # Internal Gemma loading utils
 import os
 
 def stitch_hybrid_model(base_gemma_params, titans_delta_params):
