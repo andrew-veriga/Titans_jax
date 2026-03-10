@@ -1,7 +1,33 @@
-jax
-jaxlib
-flax
-optax
+# Core JAX/Flax
+jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+flax==0.12.5
+optax==0.2.7
+transformers>=4.38.0
+
+# Frameworks
+gemma>=3.3.0
+kauldron>=1.3.0
+tensorflow>=2.15.0
+
+# Critical Downgrades & Compatibility
+typeguard==4.4.1
+etils[edc,enp,epath,epy,etree]
+jaxtyping
+sentencepiece
+
+# Utilities
 einops
 einx
-typing_extensions
+treescope
+chex
+ml_collections
+mediapy
+graphviz
+scikit-image
+scikit-learn
+pandas
+altair
+clu
+grain
+orbax-checkpoint
+orbax-export

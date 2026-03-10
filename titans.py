@@ -1,13 +1,12 @@
 import math
 from functools import partial
-from typing import Callable, Any, Optional, Union
+from typing import Callable, Any, Optional, Union, Dict, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 import flax.linen as nn
 import optax
-import einx
 from einops import rearrange, repeat, pack, unpack
 
 from associative_scan import associative_scan, binary_operator, pad_at_dim
@@ -19,6 +18,7 @@ b - batch
 n - sequence
 d - feature dimension
 c - intra-chunk
+h - heads
 """
 
 
@@ -58,8 +58,6 @@ def softclamp_max(t, max_value):
 
 
 def softclamp_grad_norm(t, max_value):
-    # This is trickier in JAX because it's usually applied during gradient computation
-    # But we can still have a function that does it on an array.
     t, inverse = pack_one_with_inverse(t, 'bn *')
     
     norm = jnp.linalg.norm(t, axis=-1, keepdims=True)
@@ -75,7 +73,6 @@ class MultiheadRMSNorm(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        # RMSNorm in Flax
         normed = nn.RMSNorm(use_scale=False)(x)
         gamma = self.param('gamma', nn.initializers.zeros, (self.heads, 1, self.dim))
         return normed * (gamma + 1.0)
@@ -92,7 +89,7 @@ class MemoryMLP(nn.Module):
             if not is_first:
                 x = nn.silu(x)
             
-            weight = self.param(f'weight_{ind}', nn.initializers.normal(), (self.dim, self.dim))
+            weight = self.param(f'weight_{ind}', nn.initializers.normal(stddev=0.02), (self.dim, self.dim))
             x = x @ weight
         return x
 
@@ -104,6 +101,24 @@ def default_adaptive_step_transform(adaptive_step, max_lr=1e-2):
 def default_loss_fn(pred, target):
     return jnp.mean((pred - target) ** 2, axis=-1)
 
+def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[int] = None, mlp_depth: int = 2):
+    """Standalone function to initialize memory state without Module scope issues."""
+    dim_head = default(dim_head, dim // heads if dim_head is None else dim_head)
+    
+    params = {}
+    key = jax.random.PRNGKey(0)
+    for i in range(mlp_depth):
+        key, subkey = jax.random.split(key)
+        params[f'weight_{i}'] = jax.random.normal(subkey, (dim_head, dim_head)) * 0.02
+        
+    # Expand params to (batch, heads, ...) to be compatible with Gemma's batch dim flattening
+    def expand_and_init(p):
+        return repeat(p, '... -> b h ...', b=batch_size, h=heads)
+        
+    initial_weights = jax.tree_util.tree_map(expand_and_init, params)
+    momentum = jax.tree_util.tree_map(jnp.zeros_like, initial_weights)
+    
+    return (initial_weights, momentum)
 
 class NeuralMemory(nn.Module):
     dim: int
@@ -116,17 +131,15 @@ class NeuralMemory(nn.Module):
     pre_rmsnorm: bool = True
     post_rmsnorm: bool = True
     max_grad_norm: Optional[float] = None
-    # Accelerated scan in JAX is just lax.associative_scan
     default_mlp_kwargs: dict = None
 
     def setup(self):
-        dim_head = default(self.dim_head, self.dim)
+        dim_head = default(self.dim_head, self.dim // self.heads if self.dim_head is None else self.dim_head)
         dim_inner = dim_head * self.heads
 
         self.retrieve_norm = nn.RMSNorm(use_scale=True) if self.pre_rmsnorm else identity
         self.store_norm = nn.RMSNorm(use_scale=True) if self.pre_rmsnorm else identity
         
-        # post_rmsnorm in original was MultiheadRMSNorm
         self.multihead_rmsnorm = MultiheadRMSNorm(dim_head, self.heads) if self.post_rmsnorm else identity
 
         self.combine_heads = nn.Dense(self.dim, use_bias=False) if self.heads > 1 else identity
@@ -148,7 +161,6 @@ class NeuralMemory(nn.Module):
         self.to_queries = nn.Dense(dim_inner, use_bias=False)
         self.to_keys_values = nn.Dense(dim_inner * 2, use_bias=False)
 
-        # momentum, adaptive step, decay factor
         self.to_momentum = nn.Dense(self.heads, use_bias=False)
         self.to_adaptive_step = nn.Dense(self.heads, use_bias=False)
         self.to_decay_factor = nn.Dense(self.heads, use_bias=False)
@@ -157,24 +169,22 @@ class NeuralMemory(nn.Module):
 
         # prepare per sample grad fn
         def forward_and_loss(params, inputs, loss_weights, target):
-            # params here is the pytree of the memory model
             pred = self.memory_model.apply({'params': params}, inputs)
             loss = self.store_memory_loss_fn(pred, target)
             loss = loss * loss_weights
             return loss.sum()
 
-        self.per_sample_grad_fn = jax.vmap(jax.grad(forward_and_loss), in_axes=(None, 0, 0, 0))
+        self.grad_fn = jax.grad(forward_and_loss)
 
-    def init_weights_and_momentum(self, rng, dim_head):
-        dummy_input = jnp.zeros((1, dim_head))
-        variables = self.memory_model.init(rng, dummy_input)
-        params = variables['params']
-        
-        # Momentum has same structure as params
-        momentum = jax.tree_util.tree_map(jnp.zeros_like, params)
-        return params, momentum
+    def init_state(self, batch_size: int):
+        mlp_depth = 2
+        if exists(self.default_mlp_kwargs):
+            mlp_depth = self.default_mlp_kwargs.get('depth', 2)
+            
+        return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth)
 
     def store_memories(self, seq, past_state):
+        batch = seq.shape[0]
         seq = self.store_norm(seq)
         
         seq_len = seq.shape[1]
@@ -185,7 +195,7 @@ class NeuralMemory(nn.Module):
         
         # adaptive lr, momentum, decay
         adaptive_lr = self.to_adaptive_step(seq)
-        adaptive_lr = rearrange(adaptive_lr, 'b n h -> (b h) n')
+        adaptive_lr = rearrange(adaptive_lr, 'b n h -> b h n')
         adaptive_lr = self.adaptive_step_transform(adaptive_lr)
 
         # momentum and decay factor need to be averaged within chunk
@@ -193,36 +203,40 @@ class NeuralMemory(nn.Module):
         seq_mean = jnp.mean(seq_chunked, axis=2)
         
         adaptive_momentum = jax.nn.sigmoid(self.to_momentum(seq_mean))
-        adaptive_momentum = rearrange(adaptive_momentum, 'b n h -> (b h) n 1')
+        adaptive_momentum = rearrange(adaptive_momentum, 'b n h -> b h n 1')
         
         decay_factor = jax.nn.sigmoid(self.to_decay_factor(seq_mean))
-        decay_factor = rearrange(decay_factor, 'b n h -> (b h) n 1')
+        decay_factor = rearrange(decay_factor, 'b n h -> b h n 1')
 
         # keys and values
         kv = self.to_keys_values(seq)
         keys, values = jnp.split(kv, 2, axis=-1)
 
         # multi head
-        keys = rearrange(keys, 'b n (h d) -> (b h) n d', h=self.heads)
-        values = rearrange(values, 'b n (h d) -> (b h) n d', h=self.heads)
+        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.heads)
+        values = rearrange(values, 'b n (h d) -> b h n d', h=self.heads)
         
-        batch_heads = keys.shape[0]
+        num_chunks = round_down_seq_len // self.chunk_size
 
         # chunking
-        keys = rearrange(keys, 'b (n c) d -> (b n) c d', c=self.chunk_size)
-        values = rearrange(values, 'b (n c) d -> (b n) c d', c=self.chunk_size)
-        adaptive_lr_chunked = rearrange(adaptive_lr, 'b (n c) -> (b n) c', c=self.chunk_size)
+        keys = rearrange(keys, 'b h (n c) d -> (b h n) c d', c=self.chunk_size)
+        values = rearrange(values, 'b h (n c) d -> (b h n) c d', c=self.chunk_size)
+        adaptive_lr_chunked = rearrange(adaptive_lr, 'b h (n c) -> (b h n) c', c=self.chunk_size)
+
+        # Repeat weights for each chunk so we can vmap over everything
+        past_weights_repeated = jax.tree_util.tree_map(
+            lambda t: repeat(t, 'b h ... -> (b h n) ...', n=num_chunks),
+            past_weights
+        )
 
         # grads
-        # We need to apply grads over the batch dimension
-        # past_weights is a pytree of params for MemoryMLP
-        grads = self.per_sample_grad_fn(past_weights, keys, adaptive_lr_chunked, values)
+        grads = jax.vmap(self.grad_fn)(past_weights_repeated, keys, adaptive_lr_chunked, values)
         
         if exists(self.max_grad_norm):
             grads = jax.tree_util.tree_map(lambda t: softclamp_grad_norm(t, self.max_grad_norm), grads)
 
-        # restore batch and seq dim
-        grads = jax.tree_util.tree_map(lambda t: rearrange(t, '(b n) ... -> b n ...', b=batch_heads), grads)
+        # restore batch, heads and seq dim
+        grads = jax.tree_util.tree_map(lambda t: rearrange(t, '(b h n) ... -> b h n ...', b=batch, h=self.heads, n=num_chunks), grads)
         
         # surprises
         surprises = jax.tree_util.tree_map(lambda t: -t, grads)
@@ -232,9 +246,12 @@ class NeuralMemory(nn.Module):
         updates = {}
 
         for param_name, surprise in surprises.items():
-            batch_heads, n = surprise.shape[:2]
+            b, h, n = surprise.shape[:3]
             orig_shape = surprise.shape
-            surprise_packed = surprise.reshape(batch_heads, n, -1)
+            surprise_packed = surprise.reshape(b, h, n, -1)
+            
+            # associative scan typically operates on axis 1 (sequence)
+            # but here it's axis 2. we can rearrange to (b, h, n, ...)
             
             # momentum
             _, momentum = associative_scan(binary_operator, (adaptive_momentum, surprise_packed))
@@ -246,24 +263,12 @@ class NeuralMemory(nn.Module):
             next_momentum[param_name] = momentum.reshape(orig_shape)
 
         # compute next weights
-        # last_update: (batch_heads, ...)
-        last_update = jax.tree_util.tree_map(lambda t: t[:, -1], updates)
-        
-        # But wait, past_weights is already (batch_heads, ...) or shared?
-        # In the original, past_weights was (heads, ...)? No, it was TensorDict.
-        # Actually, in PyTorch it was shared across heads? 
-        # "past_weights, past_momentum = past_state"
-        # "curr_weights = curr_weights + past_weights"
-        
-        # We need to be careful with shapes here.
-        # In PyTorch, weights were (dim, dim) and past_weights were added to them.
-        # If past_weights are (batch, heads, ...), we need to handle that.
-        
+        last_update = jax.tree_util.tree_map(lambda t: t[:, :, -1], updates)
         next_weights = jax.tree_util.tree_map(lambda p, u: p + u, past_weights, last_update)
         
         return updates, (next_weights, next_momentum)
 
-    def retrieve_memories(self, seq, past_weights=None):
+    def retrieve_memories(self, seq, weights_with_updates):
         batch, seq_len = seq.shape[:2]
         seq = self.retrieve_norm(seq)
         
@@ -278,47 +283,28 @@ class NeuralMemory(nn.Module):
             seq_curtailed = pad_at_dim(seq_curtailed, (0, padding), dim=1)
         
         queries = self.to_queries(seq_curtailed)
-        queries = rearrange(queries, 'b n (h d) -> (b h) n d', h=self.heads)
+        queries = rearrange(queries, 'b n (h d) -> b h n d', h=self.heads)
         
-        # fetch from memory model
-        # queries: (batch*heads, next_seq_len, dim_head)
-        # past_weights: pytree where each leaf is (batch*heads, next_seq_len, ...) or (batch*heads, ...)
-        
-        # Actually, in original retrieve_memories:
-        # curr_weights = curr_weights.apply(lambda t: rearrange(t, 'b n ... -> (b n) ...'))
-        # queries = rearrange(queries, 'b (n c) d -> (b n) c d', c = chunk_size)
-        # values = functional_call(self.memory_model, dict(curr_weights), queries)
-        
-        # We need to vmap the memory model apply over (batch*heads * n)
-        batch_heads = queries.shape[0]
-        queries_chunked = rearrange(queries, 'b (n c) d -> (b n) c d', c=self.chunk_size)
-        
-        # past_weights here are actually (batch_heads, n, ...) from updates
-        # Wait, the past_weights + updates in forward was:
-        # retrieved = self.retrieve_memories(seq, past_weights + updates)
-        # updates are (batch_heads, n, ...)
-        
-        # So we need to apply the model for each chunk with its corresponding weight.
+        num_chunks = next_seq_len // self.chunk_size
+        queries_chunked = rearrange(queries, 'b h (n c) d -> (b h n) c d', c=self.chunk_size)
         
         def apply_model(p, q):
             return self.memory_model.apply({'params': p}, q)
         
-        # past_weights_chunked: (batch_heads * n, ...)
-        # past_weights: (batch_heads, n, ...)
-        past_weights_chunked = jax.tree_util.tree_map(
-            lambda t: rearrange(t, 'b n ... -> (b n) ...'), 
-            past_weights
+        # weights_with_updates: (b, h, n, ...)
+        weights_chunked = jax.tree_util.tree_map(
+            lambda t: rearrange(t, 'b h n ... -> (b h n) ...'), 
+            weights_with_updates
         )
         
-        values = jax.vmap(apply_model)(past_weights_chunked, queries_chunked)
+        values = jax.vmap(apply_model)(weights_chunked, queries_chunked)
         
-        # restore batch dim
-        values = rearrange(values, '(b h n) c d -> b h (n c) d', b=batch, h=self.heads)
+        # restore dims
+        values = rearrange(values, '(b h n) c d -> b h (n c) d', b=batch, h=self.heads, n=num_chunks)
         
         values = self.multihead_rmsnorm(values)
         
         if exists(self.retrieve_gate):
-            # seq_curtailed: (b, n, d)
             gate = self.retrieve_gate(seq_curtailed) # (b, n, h)
             gate = rearrange(gate, 'b n h -> b h n 1')
             values = values * gate
@@ -327,7 +313,6 @@ class NeuralMemory(nn.Module):
         values = self.combine_heads(values)
         
         # restore, pad with empty memory embed
-        # The original had learned empty memory embed.
         empty_embeds = repeat(self.empty_memory_embed, 'd -> b n d', b=batch, n=self.chunk_size-1)
         
         values = jnp.concatenate([empty_embeds, values], axis=1)
@@ -337,37 +322,26 @@ class NeuralMemory(nn.Module):
             
         return values
 
-    def __call__(self, seq, store_seq=None, past_state=None, return_next_memories=False):
+    def __call__(self, seq, memory_state=None, return_next_memories=False):
         batch, seq_len = seq.shape[:2]
         
         if seq_len < self.chunk_size:
-            return repeat(self.empty_memory_embed, 'd -> b n d', b=batch, n=seq_len)
+            ret = repeat(self.empty_memory_embed, 'd -> b n d', b=batch, n=seq_len)
+            if return_next_memories:
+                return ret, memory_state
+            return ret
 
-        if not exists(past_state):
-            # In Flax, we usually don't initialize state inside __call__ like this
-            # but for a direct refactoring we can handle it or assume it's passed.
-            # To be more Flax-idiomatic, we should probably handle this in a separate state.
-            # However, I'll follow the original structure as much as possible.
-            dim_head = default(self.dim_head, self.dim)
-            rng = self.make_rng('params')
-            past_state = self.init_weights_and_momentum(rng, dim_head)
+        if not exists(memory_state):
+            memory_state = self.init_state(batch)
 
-        store_seq = default(store_seq, seq)
+        updates, next_mem_state = self.store_memories(seq, memory_state)
         
-        updates, next_memories = self.store_memories(store_seq, past_state)
-        
-        past_weights, _ = past_state
-        # Add updates to past weights
-        # past_weights: (heads, ...)? No, should be (batch_heads, ...)
-        # We need to broadcast past_weights to (batch_heads, n, ...) then add updates
+        past_weights, _ = memory_state
         
         def add_updates(p, u):
-            # p: (...) or (batch_heads, ...)
-            # u: (batch_heads, n, ...)
-            if p.ndim == u.ndim - 1:
-                p_expanded = jnp.expand_dims(p, axis=1)
-            else:
-                p_expanded = jnp.expand_dims(p, axis=(0, 1))
+            # p: (b, h, ...)
+            # u: (b, h, n, ...)
+            p_expanded = jnp.expand_dims(p, axis=2)
             return p_expanded + u
             
         weights_with_updates = jax.tree_util.tree_map(add_updates, past_weights, updates)
@@ -377,4 +351,4 @@ class NeuralMemory(nn.Module):
         if not return_next_memories:
             return retrieved
             
-        return retrieved, next_memories
+        return retrieved, next_mem_state
