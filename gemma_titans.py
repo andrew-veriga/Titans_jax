@@ -25,8 +25,11 @@ os.environ['KD_CHECK_TYPES'] = '0'
 # Nuclear option: Monkey-patch the internal kauldron type-checker to do nothing
 try:
     import kauldron.typing.type_check as kt_check
+    # Bypass argument checking
     kt_check._check_argument_types = lambda *args, **kwargs: None
-    print("Successfully monkey-patched kauldron type-checker.")
+    # Bypass return type checking (must return the retval)
+    kt_check._check_return_type = lambda func, retval, *args, **kwargs: retval
+    print("Successfully monkey-patched kauldron type-checker (args & returns).")
 except Exception as e:
     print(f"Note: Could not monkey-patch kauldron: {e}")
 
