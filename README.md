@@ -34,7 +34,7 @@ Run the following in a Colab cell:
 
 # 4. Install project dependencies with critical version locks
 !pip install typeguard==4.4.1 gemma==3.3.0 kauldron==1.3.0 flax==0.12.5 optax==0.2.6
-!pip install einops einx treescope jaxtyping sentencepiece
+!pip install einops einx orbax-checkpoint datasets
 ```
 
 ### 3. Clone and Run Verification
