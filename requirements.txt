@@ -1,7 +1,7 @@
 # Core JAX/Flax
 jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 flax==0.12.5
-optax==0.2.7
+optax==0.2.6
 transformers>=4.38.0
 
 # Frameworks

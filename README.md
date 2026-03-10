@@ -30,7 +30,7 @@ Run the following in a Colab cell:
 !pip install tensorflow==2.18.0 tensorflow-tpu==2.18.0 --find-links=https://storage.googleapis.com/libtpu-tf-releases/index.html
 
 # 3. Install project dependencies with critical version locks
-!pip install typeguard==4.4.1 gemma==3.3.0 kauldron==1.3.0 flax==0.12.5 optax==0.2.7
+!pip install typeguard==4.4.1 gemma==3.3.0 kauldron==1.3.0 flax==0.12.5 optax==0.2.6
 !pip install einops einx treescope jaxtyping sentencepiece
 ```
 
