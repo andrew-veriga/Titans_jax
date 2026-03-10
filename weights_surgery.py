@@ -26,7 +26,7 @@ def perform_surgery_and_save_delta(output_path):
         attention_types=[_modules.AttentionType.GLOBAL] * 18, # Gemma-2B has 18 layers
     )
     
-    model = GemmaTitansTransformer(config=config, dtype=jnp.float32)
+    model = GemmaTitansTransformer(config=config, dtype=jnp.bfloat16)
     
     # 2. Initialize random parameters to get the structure
     print("Initializing hybrid structure...")
