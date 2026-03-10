@@ -10,6 +10,8 @@ kauldron>=1.3.0
 tensorflow>=2.15.0
 
 # Critical Downgrades & Compatibility
+ml-dtypes==0.4.0
+protobuf==5.28.3
 typeguard==4.4.1
 etils[edc,enp,epath,epy,etree]
 jaxtyping

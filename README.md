@@ -23,13 +23,16 @@ Go to **Runtime** > **Change runtime type** and select:
 Run the following in a Colab cell:
 
 ```python
-# 1. Install JAX for TPU
+# 1. Install specific versions of shared dependencies first
+!pip install "ml-dtypes==0.4.0" "protobuf==5.28.3"
+
+# 2. Install JAX for TPU
 !pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
-# 2. Install TensorFlow (Required manually on TPU runtimes since March 2025)
+# 3. Install TensorFlow (Required manually on TPU runtimes since March 2025)
 !pip install tensorflow==2.18.0 tensorflow-tpu==2.18.0 --find-links=https://storage.googleapis.com/libtpu-tf-releases/index.html
 
-# 3. Install project dependencies with critical version locks
+# 4. Install project dependencies with critical version locks
 !pip install typeguard==4.4.1 gemma==3.3.0 kauldron==1.3.0 flax==0.12.5 optax==0.2.6
 !pip install einops einx treescope jaxtyping sentencepiece
 ```
