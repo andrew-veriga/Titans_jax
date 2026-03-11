@@ -32,7 +32,9 @@ def perform_surgery_and_save_delta(output_path):
     print("Initializing hybrid structure...")
     rng = jax.random.PRNGKey(0)
     dummy_tokens = jnp.ones((1, 1), dtype=jnp.int32)
-    variables = model.init(rng, tokens=dummy_tokens)
+    # JIT compile init to run on TPU and prevent CPU RAM OOM
+    init_fn = jax.jit(model.init)
+    variables = init_fn(rng, tokens=dummy_tokens)
     params = variables['params']
     
     # 3. Extract only the Titans parameters (The Delta)
