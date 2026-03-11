@@ -14,6 +14,7 @@ from gemma.gm.nn import _config
 from gemma.gm.nn import _layers
 from gemma.gm.nn import _modules
 from gemma.gm.nn import _transformer
+from gemma.gm.nn import _gemma
 from gemma.gm.utils import _jax_utils
 from gemma.gm.utils import _dtype_params
 from gemma.gm.vision import _token_utils
@@ -21,9 +22,6 @@ from kauldron.typing import Bool, Float, Int, UInt8
 import os
 os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
-
-# Nuclear option: Monkey-patch the internal kauldron type-checker to do nothing
-# (Removed as Kauldron is no longer actively used here)
 
 # Import the existing Neural Memory from the project
 from titans import NeuralMemory, init_memory_state
@@ -107,8 +105,9 @@ class TitansBlock(_modules.Block):
 
         return new_cache, outputs
 
-class GemmaTitansTransformer(_transformer.Transformer):
-    """Gemma Transformer using TitansBlocks."""
+
+class Gemma3_1B_Titans(_gemma.Gemma3_1B):
+    """Gemma3 1B with integrated Titans NLTM."""
     
     def setup(self):
         self.embedder = _modules.Embedder(
