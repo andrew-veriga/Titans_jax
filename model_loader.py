@@ -14,14 +14,29 @@ def stitch_hybrid_model(base_gemma_params, titans_delta_params):
     Returns:
         A complete hybrid Pytree ready for model.apply()
     """
-    def merge_fn(base, delta):
-        # If we have a delta value (Titans weight), use it.
-        # Otherwise, keep the base Gemma weight.
-        if delta is not None:
-            return delta
-        return base
+    def _merge(base, delta):
+        # Handle dictionary-like structures
+        if hasattr(base, 'items') and hasattr(delta, 'items'):
+            merged = dict(base)
+            for k, v in delta.items():
+                if k in merged:
+                    merged[k] = _merge(merged[k], v)
+                else:
+                    merged[k] = v
+            # If the original base was a specific class like FrozenDict, 
+            # returning a standard dict is generally fine for JAX/Flax.
+            return merged
+        # Handle lists or tuples
+        elif isinstance(base, (list, tuple)) and isinstance(delta, (list, tuple)):
+            merged = []
+            for b, d in zip(base, delta):
+                merged.append(_merge(b, d))
+            return type(base)(merged)
+        else:
+            # For leaves, if delta has a value use it, else keep base weight
+            return delta if delta is not None else base
 
-    return jax.tree_util.tree_map(merge_fn, base_gemma_params, titans_delta_params)
+    return _merge(base_gemma_params, titans_delta_params)
 
 def load_titans_delta(path):
     """Loads the small Titans-only checkpoint."""
