@@ -23,15 +23,7 @@ os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
 
 # Nuclear option: Monkey-patch the internal kauldron type-checker to do nothing
-try:
-    import kauldron.typing.type_check as kt_check
-    # Bypass argument checking
-    kt_check._check_argument_types = lambda *args, **kwargs: None
-    # Bypass return type checking (must return the retval)
-    kt_check._check_return_type = lambda func, retval, *args, **kwargs: retval
-    print("Successfully monkey-patched kauldron type-checker (args & returns).")
-except Exception as e:
-    print(f"Note: Could not monkey-patch kauldron: {e}")
+# (Removed as Kauldron is no longer actively used here)
 
 # Import the existing Neural Memory from the project
 from titans import NeuralMemory, init_memory_state

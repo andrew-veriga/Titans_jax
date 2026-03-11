@@ -1,20 +1,8 @@
-# Core JAX/Flax
---find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax[tpu]
+# Minimal Requirements for Gemma-Titans Hybrid
+gemma==3.3.0
 flax==0.12.5
 optax==0.2.6
-
-# Frameworks
-gemma==3.3.0
-kauldron==1.3.0
-
-# Critical Downgrades & Compatibility
-ml-dtypes==0.4.0
-protobuf==5.28.3
 typeguard==4.4.1
-
-# Utilities
-einops
 einx
-orbax-checkpoint
+kagglehub
 datasets

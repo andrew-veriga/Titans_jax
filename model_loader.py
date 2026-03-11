@@ -30,7 +30,7 @@ def load_titans_delta(path):
 
 # Example usage pattern for Colab:
 # 1. Load official Gemma:
-#    params_2b = gm.ckpts.load_from_path(CKPT_PATH)
+#    params_2b = gm.ckpts.load_params(CKPT_PATH)
 # 2. Load Titans Delta:
 #    delta = load_titans_delta("./titans_delta_init")
 # 3. Stitch:

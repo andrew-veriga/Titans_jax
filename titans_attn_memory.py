@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 import flax.linen as nn
-import optax
-import einx
+# import optax
+# import einx
 from einops import rearrange, repeat, pack, unpack
 
 from associative_scan import associative_scan, binary_operator, pad_at_dim
