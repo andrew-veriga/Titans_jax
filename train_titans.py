@@ -17,7 +17,7 @@ from titans_ckpts import SkipTitans
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 # 1. Define Model Config
-gemma_config = _config.Gemma3_1B_Config()
+gemma_config = gm.nn.Gemma3_1B.config
 
 # 2. Wrap our hybrid model for Kauldron
 # Note: Gemma3_1B_Titans naturally returns _transformer.Output 
