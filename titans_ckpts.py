@@ -13,10 +13,10 @@ else:
 
 
 @dataclasses.dataclass(frozen=True)
-class SkipTitans(kd.ckpts.AbstractPartialLoader):
+class SkipTitans(kd.ckpts.PartialKauldronLoader):
   """Wraps a partial loader to not restore the Titans weights."""
 
-  wrapped: kd.ckpts.AbstractPartialLoader
+  wrapped: kd.ckpts.PartialKauldronLoader
 
   def transform(self, state: _StateT) -> _StateT:  # pytype: disable=signature-mismatch
     # Remove the Titans weights from the params structure so it can be restored
