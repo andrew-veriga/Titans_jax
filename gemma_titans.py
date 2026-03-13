@@ -119,7 +119,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         )
 
         self.blocks = [
-            TitansBlock(
+            nn.remat(TitansBlock)(
                 name=f'layer_{i}',
                 num_heads=self.config.num_heads,
                 num_kv_heads=self.config.num_kv_heads,
