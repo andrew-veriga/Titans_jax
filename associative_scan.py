@@ -28,16 +28,11 @@ def binary_operator(
 
 def associative_scan(
     operator: Callable,
-    elems: tuple[Array, Array]
+    elems: tuple[Array, Array],
+    axis: int
 ):
     """
     Performs an associative scan on the input tuples.
     Uses JAX's lax.associative_scan.
     """
-    # elems has shape (batch, heads, seq, ...)
-    # We want to scan over the seq dimension (axis 2).
-    # We vmap over batch (axis 0) and then heads (axis 1).
-    def scan_fn(x):
-        return jax.lax.associative_scan(operator, x)
-    
-    return jax.vmap(jax.vmap(scan_fn))(elems)
+    return jax.lax.associative_scan(operator, elems, axis=axis)

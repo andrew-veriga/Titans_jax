@@ -254,10 +254,10 @@ class NeuralMemory(nn.Module):
             # but here it's axis 2. we can rearrange to (b, h, n, ...)
             
             # momentum
-            _, momentum = associative_scan(binary_operator, (adaptive_momentum, surprise_packed))
+            _, momentum = associative_scan(binary_operator, (adaptive_momentum, surprise_packed), axis=2)
             
             # update with decay
-            _, update = associative_scan(binary_operator, (1.0 - decay_factor, momentum))
+            _, update = associative_scan(binary_operator, (1.0 - decay_factor, momentum), axis=2)
             
             updates[param_name] = update.reshape(orig_shape)
             next_momentum[param_name] = momentum.reshape(orig_shape)

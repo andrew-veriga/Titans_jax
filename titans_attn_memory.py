@@ -198,10 +198,10 @@ class NeuralMemory(nn.Module):
             surprise_packed = surprise.reshape(batch_heads, n, -1)
             
             # momentum
-            _, momentum = associative_scan(binary_operator, (adaptive_momentum, surprise_packed))
+            _, momentum = associative_scan(binary_operator, (adaptive_momentum, surprise_packed), axis=1)
             
             # update with decay
-            _, update = associative_scan(binary_operator, (1.0 - decay_factor, momentum))
+            _, update = associative_scan(binary_operator, (1.0 - decay_factor, momentum), axis=1)
             
             updates[param_name] = update.reshape(orig_shape)
             next_momentum[param_name] = momentum.reshape(orig_shape)
