@@ -142,6 +142,27 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 rope_scale_factor=self.config.local_scale_factor
                 if attn_type == _modules.AttentionType.LOCAL_SLIDING
                 else self.config.global_scale_factor,
+            ) if i == 11 else _modules.Block(
+                name=f'layer_{i}',
+                num_heads=self.config.num_heads,
+                num_kv_heads=self.config.num_kv_heads,
+                embed_dim=self.config.embed_dim,
+                head_dim=self.config.head_dim,
+                hidden_dim=self.config.hidden_dim,
+                sliding_window_size=self.config.sliding_window_size,
+                use_post_attn_norm=self.config.use_post_attn_norm,
+                use_post_ffw_norm=self.config.use_post_ffw_norm,
+                attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+                attn_type=attn_type,
+                query_pre_attn_scalar=self.config.query_pre_attn_scalar(),
+                transpose_gating_einsum=self.config.transpose_gating_einsum,
+                use_qk_norm=self.config.use_qk_norm,
+                rope_base_frequency=self.config.local_base_frequency
+                if attn_type == _modules.AttentionType.LOCAL_SLIDING
+                else self.config.global_base_frequency,
+                rope_scale_factor=self.config.local_scale_factor
+                if attn_type == _modules.AttentionType.LOCAL_SLIDING
+                else self.config.global_scale_factor,
             )
             for i, attn_type in zip(
                 range(self.config.num_layers), self.config.attention_types
@@ -255,11 +276,15 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 dtype=dtype
             )
             
-            mem_state = init_memory_state(
-                batch_size=batch_size,
-                dim=self.config.embed_dim,
-                heads=self.config.num_heads
-            )
+            if i == 11:
+                mem_state = init_memory_state(
+                    batch_size=batch_size,
+                    dim=self.config.embed_dim,
+                    heads=self.config.num_heads,
+                    dim_head=64
+                )
+            else:
+                mem_state = None
             
             cache[layer_name] = TitansLayerCache(
                 attention_cache=attn_cache,
