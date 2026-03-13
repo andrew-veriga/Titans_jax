@@ -34,6 +34,10 @@ def associative_scan(
     Performs an associative scan on the input tuples.
     Uses JAX's lax.associative_scan.
     """
-    # JAX's lax.associative_scan scans over the first dimension (axis 0).
-    # Since our input is (batch, seq, ...), we vmap over the batch dimension.
-    return jax.vmap(lambda x: jax.lax.associative_scan(operator, x))(elems)
+    # elems has shape (batch, heads, seq, ...)
+    # We want to scan over the seq dimension (axis 2).
+    # We vmap over batch (axis 0) and then heads (axis 1).
+    def scan_fn(x):
+        return jax.lax.associative_scan(operator, x)
+    
+    return jax.vmap(jax.vmap(scan_fn))(elems)

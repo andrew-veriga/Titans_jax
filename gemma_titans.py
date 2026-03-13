@@ -40,6 +40,7 @@ class TitansBlock(_modules.Block):
         self.memory = NeuralMemory(
             dim=self.embed_dim,
             heads=self.num_heads,
+            chunk_size=16,
         )
         
         self.memory_gate = self.param('memory_gate', nn.initializers.zeros, (1,))
