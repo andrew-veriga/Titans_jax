@@ -18,6 +18,7 @@ from gemma.gm.nn import _gemma
 from gemma.gm.utils import _jax_utils
 from gemma.gm.utils import _dtype_params
 from gemma.gm.vision import _token_utils
+from gemma.gm.utils import _cache_helper
 from kauldron.typing import Bool, Float, Int, UInt8
 import os
 os.environ['KAULDRON_TYPECHECK'] = '0'
@@ -26,10 +27,14 @@ os.environ['KD_CHECK_TYPES'] = '0'
 # Import the existing Neural Memory from the project
 from titans import NeuralMemory, init_memory_state
 
-@struct.dataclass
-class TitansLayerCache:
-    attention_cache: Optional[_modules.LayerCache]
-    memory_state: Optional[Any] # State for NeuralMemory
+# Monkeypatch _set_cache to support memory_state merging during prefill
+_orig_set_cache = _cache_helper._set_cache
+def _new_set_cache(layer_data0, layer_data1, *, key):
+    layer_data0 = _orig_set_cache(layer_data0, layer_data1, key=key)
+    if 'memory_state' in layer_data1:
+        layer_data0['memory_state'] = layer_data1['memory_state']
+    return layer_data0
+_cache_helper._set_cache = _new_set_cache
 
 class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
@@ -50,19 +55,13 @@ class TitansBlock(_modules.Block):
         self,
         x: jax.Array,
         segment_pos: jax.Array,
-        cache: Optional[Union[_modules.LayerCache, TitansLayerCache]],
+        cache: Optional[Dict[str, Any]],
         attn_mask: jax.Array,
-    ) -> tuple[Optional[TitansLayerCache], jax.Array]:
+    ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
         
-        # Handle different cache types
-        if isinstance(cache, dict) and not isinstance(cache, TitansLayerCache):
-            attn_cache = cache
-            mem_state = None
-        elif isinstance(cache, TitansLayerCache):
-            attn_cache = cache.attention_cache
-            mem_state = cache.memory_state
+        if cache is not None:
+            mem_state = cache.get('memory_state')
         else:
-            attn_cache = None
             mem_state = None
 
         inputs_normalized = self.pre_attention_norm(x)
@@ -71,7 +70,7 @@ class TitansBlock(_modules.Block):
         new_attn_cache, attn_output = self.attn(
             inputs_normalized,
             segment_pos,
-            attn_cache,
+            cache,
             attn_mask,
         )
 
@@ -100,10 +99,11 @@ class TitansBlock(_modules.Block):
         outputs += combined_output
 
         # Construct new cache
-        new_cache = TitansLayerCache(
-            attention_cache=new_attn_cache,
-            memory_state=next_mem_state
-        )
+        if cache is not None:
+            new_cache = dict(new_attn_cache)
+            new_cache['memory_state'] = next_mem_state
+        else:
+            new_cache = None
 
         return new_cache, outputs
 
@@ -172,7 +172,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         *,
         images: UInt8['*B N H W C'] | UInt8['*B H W C'] | None = None,
         positions: Int['*B L_with_mm'] | None = None,
-        cache: Optional[Dict[str, TitansLayerCache]] = None,
+        cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
         return_last_only: bool | None = None,
         return_hidden_states: bool | None = None,
@@ -222,8 +222,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         )
 
     def _apply_attention(
-        self, inputs: _transformer._Inputs, cache: Optional[Dict[str, TitansLayerCache]]
-    ) -> tuple[jax.Array, Dict[str, TitansLayerCache]]:
+        self, inputs: _transformer._Inputs, cache: Optional[Dict[str, Any]]
+    ) -> tuple[jax.Array, Dict[str, Any]]:
         x = inputs.embeddings
         old_cache = cache or {}
         new_cache = {}
@@ -247,7 +247,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         dtype: jnp.dtype,
         cache_length: int,
         sharding: Any = None,
-    ) -> Dict[str, TitansLayerCache]:
+    ) -> Dict[str, Any]:
         
         titans_layer_indices = getattr(self, "titans_layer_indices", [11])
         cache = {}
@@ -269,10 +269,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     heads=self.config.num_heads,
                     dim_head=64
                 )
-                cache[layer_name] = TitansLayerCache(
-                    attention_cache=attn_cache,
-                    memory_state=mem_state
-                )
+                attn_cache['memory_state'] = mem_state
+                cache[layer_name] = attn_cache
             else:
                 cache[layer_name] = attn_cache
             
