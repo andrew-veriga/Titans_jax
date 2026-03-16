@@ -269,12 +269,11 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     heads=self.config.num_heads,
                     dim_head=64
                 )
+                cache[layer_name] = TitansLayerCache(
+                    attention_cache=attn_cache,
+                    memory_state=mem_state
+                )
             else:
-                mem_state = None
-            
-            cache[layer_name] = TitansLayerCache(
-                attention_cache=attn_cache,
-                memory_state=mem_state
-            )
+                cache[layer_name] = attn_cache
             
         return cache
