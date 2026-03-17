@@ -6,3 +6,6 @@ __pycache__/
 
 .vscode/
 Kauldron_Titans_TPU.ipynb
+dialog/
+gemma/
+kauldron/
