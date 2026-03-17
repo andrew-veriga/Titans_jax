@@ -266,7 +266,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
                     heads=self.config.num_heads,
-                    dim_head=64
+                    dim_head=64,
+                    dtype=dtype
                 )
                 attn_cache['memory_state'] = mem_state
                 cache[layer_name] = attn_cache

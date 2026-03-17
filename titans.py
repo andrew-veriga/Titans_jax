@@ -101,7 +101,7 @@ def default_adaptive_step_transform(adaptive_step, max_lr=1e-2):
 def default_loss_fn(pred, target):
     return jnp.mean((pred - target) ** 2, axis=-1)
 
-def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[int] = None, mlp_depth: int = 2):
+def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[int] = None, mlp_depth: int = 2, *, dtype: Any):
     """Standalone function to initialize memory state without Module scope issues."""
     dim_head = default(dim_head, dim // heads if dim_head is None else dim_head)
     
@@ -109,7 +109,7 @@ def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[
     key = jax.random.PRNGKey(0)
     for i in range(mlp_depth):
         key, subkey = jax.random.split(key)
-        params[f'weight_{i}'] = jax.random.normal(subkey, (dim_head, dim_head)) * 0.02
+        params[f'weight_{i}'] = (jax.random.normal(subkey, (dim_head, dim_head)) * 0.02).astype(dtype)
         
     # Expand params to (batch, heads, ...) to be compatible with Gemma's batch dim flattening
     def expand_and_init(p):
@@ -176,12 +176,12 @@ class NeuralMemory(nn.Module):
 
         self.grad_fn = jax.grad(forward_and_loss)
 
-    def init_state(self, batch_size: int):
+    def init_state(self, batch_size: int, *, dtype: Any):
         mlp_depth = 2
         if exists(self.default_mlp_kwargs):
             mlp_depth = self.default_mlp_kwargs.get('depth', 2)
             
-        return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth)
+        return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth, dtype=dtype)
 
     def store_memories(self, seq, past_state):
         batch = seq.shape[0]
@@ -332,7 +332,7 @@ class NeuralMemory(nn.Module):
             return ret
 
         if not exists(memory_state):
-            memory_state = self.init_state(batch)
+            memory_state = self.init_state(batch, dtype=seq.dtype)
 
         updates, next_mem_state = self.store_memories(seq, memory_state)
         
