@@ -161,7 +161,6 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         nn.jit,
         static_argnames=(
             'self',
-            'return_last_only',
             'return_hidden_states',
         ),
     )
@@ -174,11 +173,11 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         positions: Int['*B L_with_mm'] | None = None,
         cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
-        return_last_only: bool | None = None,
         return_hidden_states: bool | None = None,
+        **kwargs,
     ) -> _transformer.Output:
         """Forward pass - copied from base class to bypass @typechecked on cache."""
-        return_last_only = self._get_return_last_only(return_last_only)
+        return_last_only = self.return_last_only
 
         with _dtype_params.initialize_param_with_dtype(
             self.dtype,
