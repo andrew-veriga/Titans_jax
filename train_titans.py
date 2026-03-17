@@ -49,7 +49,6 @@ def build_trainer(
             # or classification depending on the task.
             # In a pure CPT task, we might want all hidden states, but let's 
             # assume a standard setup for now.
-            return_last_only=True,
         ),
         
         # 3. Load the weights using our custom SkipTitans
