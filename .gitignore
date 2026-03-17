@@ -5,7 +5,4 @@ __pycache__/
 .DS_Store
 
 .vscode/
-Kauldron_Titans_TPU.ipynb
-dialog/
-gemma/
-kauldron/
+deepmind_finetuning.ipynb
