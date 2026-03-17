@@ -28,13 +28,18 @@ os.environ['KD_CHECK_TYPES'] = '0'
 from titans import NeuralMemory, init_memory_state
 
 # Monkeypatch _set_cache to support memory_state merging during prefill
-_orig_set_cache = _cache_helper._set_cache
-def _new_set_cache(layer_data0, layer_data1, *, key):
-    layer_data0 = _orig_set_cache(layer_data0, layer_data1, key=key)
-    if 'memory_state' in layer_data1:
-        layer_data0['memory_state'] = layer_data1['memory_state']
-    return layer_data0
-_cache_helper._set_cache = _new_set_cache
+# To safely handle Colab cell re-runs without recursion, check if the function is already patched.
+if not hasattr(_cache_helper._set_cache, '_is_titans_patched'):
+    _orig_set_cache = _cache_helper._set_cache
+
+    def _new_set_cache(layer_data0, layer_data1, *, key):
+        layer_data0 = _orig_set_cache(layer_data0, layer_data1, key=key)
+        if 'memory_state' in layer_data1:
+            layer_data0['memory_state'] = layer_data1['memory_state']
+        return layer_data0
+    
+    _new_set_cache._is_titans_patched = True
+    _cache_helper._set_cache = _new_set_cache
 
 class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
