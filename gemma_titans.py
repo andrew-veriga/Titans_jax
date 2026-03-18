@@ -153,7 +153,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             )
             
             if i in titans_layer_indices:
-                blocks.append(nn.remat(TitansBlock)(**block_kwargs))
+                blocks.append(TitansBlock(**block_kwargs))
             else:
                 blocks.append(_modules.Block(**block_kwargs))
                 

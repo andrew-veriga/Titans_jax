@@ -219,18 +219,32 @@ class NeuralMemory(nn.Module):
         num_chunks = round_down_seq_len // self.chunk_size
 
         # chunking
-        keys = rearrange(keys, 'b h (n c) d -> (b h n) c d', c=self.chunk_size)
-        values = rearrange(values, 'b h (n c) d -> (b h n) c d', c=self.chunk_size)
-        adaptive_lr_chunked = rearrange(adaptive_lr, 'b h (n c) -> (b h n) c', c=self.chunk_size)
+        keys = rearrange(keys, 'b h (n c) d -> n (b h) c d', c=self.chunk_size)
+        values = rearrange(values, 'b h (n c) d -> n (b h) c d', c=self.chunk_size)
+        adaptive_lr_chunked = rearrange(adaptive_lr, 'b h (n c) -> n (b h) c', c=self.chunk_size)
 
-        # Repeat weights for each chunk so we can vmap over everything
-        past_weights_repeated = jax.tree_util.tree_map(
-            lambda t: repeat(t, 'b h ... -> (b h n) ...', n=num_chunks),
+        # Flatten weights over batch and heads to vmap inside scan
+        past_weights_bh = jax.tree_util.tree_map(
+            lambda t: rearrange(t, 'b h ... -> (b h) ...'),
             past_weights
         )
 
-        # grads
-        grads = jax.vmap(self.grad_fn)(past_weights_repeated, keys, adaptive_lr_chunked, values)
+        def scan_step(carry, xs):
+            k, lr, v = xs
+            g = jax.vmap(self.grad_fn)(past_weights_bh, k, lr, v)
+            return carry, g
+
+        _, grads = jax.lax.scan(
+            scan_step,
+            init=None,
+            xs=(keys, adaptive_lr_chunked, values)
+        )
+        
+        # restore to (b h n) ... so subsequent code remains unchanged
+        grads = jax.tree_util.tree_map(
+            lambda t: rearrange(t, 'n (b h) ... -> (b h n) ...', b=batch, h=self.heads), 
+            grads
+        )
         
         if exists(self.max_grad_norm):
             grads = jax.tree_util.tree_map(lambda t: softclamp_grad_norm(t, self.max_grad_norm), grads)
