@@ -116,9 +116,7 @@ class TitansBlock(_modules.Block):
 @dataclasses.dataclass(frozen=True)
 class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
-    titans_layer_indices: list[int] = dataclasses.field(
-        default_factory=lambda: [11, 15, 23]
-    )
+    titans_layer_indices: tuple[int, ...] = (11, 15, 23)
 
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     """Gemma3 1B with integrated Titans NLTM."""
