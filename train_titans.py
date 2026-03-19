@@ -10,15 +10,14 @@ from gemma import gm
 from gemma.gm.nn import _config
 
 # Import our custom modules
-from gemma_titans import Gemma3_1B_Titans
+from gemma_titans import Gemma3_1B_Titans, Gemma_Titans_Config
 from titans_ckpts import SkipTitans
 
 # TPU / Memory settings (optional, adapt as needed for your specific pod)
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 # 1. Define Model Config
-gemma_config = gm.nn.Gemma3_1B.config
-gemma_config.titans_layer_indices = [11, 15, 23]
+gemma_config = Gemma_Titans_Config
 
 # 2. Wrap our hybrid model for Kauldron
 # Note: Gemma3_1B_Titans naturally returns _transformer.Output 

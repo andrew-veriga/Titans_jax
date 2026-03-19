@@ -113,9 +113,21 @@ class TitansBlock(_modules.Block):
         return new_cache, outputs
 
 
+@dataclasses.dataclass
+class Gemma_Titans_Config(_config.TransformerConfig):
+    """Configuration for Gemma3 with Titans NLTM."""
+    titans_layer_indices: list[int] = dataclasses.field(
+        default_factory=lambda: [11, 15, 23]
+    )
+
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     """Gemma3 1B with integrated Titans NLTM."""
     
+    config: Gemma_Titans_Config = Gemma_Titans_Config(
+        **{f.name: getattr(_gemma.Gemma3_1B.config, f.name) 
+           for f in dataclasses.fields(_config.TransformerConfig)}
+    )
+
     def setup(self):
         self.embedder = _modules.Embedder(
             vocab_size=self.config.num_embed,
@@ -124,8 +136,6 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             if self.config.vision_encoder
             else None,
         )
-
-        titans_layer_indices = getattr(self.config, "titans_layer_indices", [11, 15, 23])
 
         blocks = []
         for i, attn_type in zip(range(self.config.num_layers), self.config.attention_types):
@@ -152,7 +162,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 else self.config.global_scale_factor,
             )
             
-            if i in titans_layer_indices:
+            if i in self.config.titans_layer_indices:
                 blocks.append(TitansBlock(**block_kwargs))
             else:
                 blocks.append(_modules.Block(**block_kwargs))
@@ -253,7 +263,6 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         sharding: Any = None,
     ) -> Dict[str, Any]:
         
-        titans_layer_indices = getattr(self.config, "titans_layer_indices", [11, 15, 23])
         cache = {}
         for i in range(self.config.num_layers):
             layer_name = f'layer_{i}'
@@ -266,7 +275,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 dtype=dtype
             )
             
-            if i in titans_layer_indices:
+            if i in self.config.titans_layer_indices:
                 mem_state = init_memory_state(
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
@@ -275,8 +284,6 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     dtype=dtype
                 )
                 attn_cache['memory_state'] = mem_state
-                cache[layer_name] = attn_cache
-            else:
-                cache[layer_name] = attn_cache
+            cache[layer_name] = attn_cache
             
         return cache
