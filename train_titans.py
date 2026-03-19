@@ -18,6 +18,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 # 1. Define Model Config
 gemma_config = gm.nn.Gemma3_1B.config
+gemma_config.titans_layer_indices = [11, 15, 23]
 
 # 2. Wrap our hybrid model for Kauldron
 # Note: Gemma3_1B_Titans naturally returns _transformer.Output 

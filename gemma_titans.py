@@ -125,7 +125,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             else None,
         )
 
-        titans_layer_indices = getattr(self, "titans_layer_indices", [11, 15, 23])
+        titans_layer_indices = getattr(self.config, "titans_layer_indices", [11, 15, 23])
 
         blocks = []
         for i, attn_type in zip(range(self.config.num_layers), self.config.attention_types):
@@ -253,7 +253,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         sharding: Any = None,
     ) -> Dict[str, Any]:
         
-        titans_layer_indices = getattr(self, "titans_layer_indices", [11])
+        titans_layer_indices = getattr(self.config, "titans_layer_indices", [11, 15, 23])
         cache = {}
         for i in range(self.config.num_layers):
             layer_name = f'layer_{i}'
