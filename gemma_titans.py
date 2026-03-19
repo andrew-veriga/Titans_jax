@@ -113,7 +113,7 @@ class TitansBlock(_modules.Block):
         return new_cache, outputs
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
     titans_layer_indices: list[int] = dataclasses.field(
@@ -138,7 +138,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         )
 
         blocks = []
-        for i, attn_type in zip(range(self.config.num_layers), self.config.attention_types):
+        num_layers = len(self.config.attention_types)
+        for i, attn_type in zip(range(num_layers), self.config.attention_types):
             block_kwargs = dict(
                 name=f'layer_{i}',
                 num_heads=self.config.num_heads,
@@ -264,7 +265,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     ) -> Dict[str, Any]:
         
         cache = {}
-        for i in range(self.config.num_layers):
+        num_layers = len(self.config.attention_types)
+        for i in range(num_layers):
             layer_name = f'layer_{i}'
             
             attn_cache = _modules.Attention.init_cache(
