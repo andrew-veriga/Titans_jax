@@ -299,35 +299,35 @@ class NeuralMemory(nn.Module):
             seq_curtailed = pad_at_dim(seq_curtailed, (0, padding), dim=1)
         
         queries = self.to_queries(seq_curtailed)
-        # 1. Выносим 'n' в первую ось
         
+        # 1. Сначала выделяем головы из queries
+        queries = rearrange(queries, 'b n (h d) -> b h n d', h=self.heads)
+        
+        # 2. Выносим ось чанков (n) вперед
         num_chunks = next_seq_len // self.chunk_size
         queries_chunked = rearrange(queries, 'b h (n c) d -> n (b h) c d', c=self.chunk_size)
         
-        def apply_model(p, q):
-            return self.memory_model.apply({'params': p}, q)
-        def _retrieve_scan_body(carry, xs):
-            w, q = xs
-            # Параллелим только по (b * h)
-            v = jax.vmap(apply_model)(w, q)
-            return carry, v
-        # 2. Оборачиваем в checkpoint для экономии памяти при backprop
-        retrieve_scan_body = nn.checkpoint(_retrieve_scan_body)
-        # 3. Идем циклом (scan) по чанкам
-        _, values = jax.lax.scan(retrieve_scan_body, None, (weights_chunked, queries_chunked))
-        
-        # 4. Возвращаем размерности (n (b h) -> b h (n c))
-        values = rearrange(values, 'n (b h) c d -> b h (n c) d', b=batch, h=self.heads)        
-        # weights_with_updates: (b, h, n, ...)
+        # 3. Переворачиваем веса для скана
         weights_chunked = jax.tree_util.tree_map(
             lambda t: rearrange(t, 'b h n ... -> n (b h) ...'), 
             weights_with_updates
         )
         
-        values = jax.vmap(apply_model)(weights_chunked, queries_chunked)
+        def apply_model(p, q):
+            return self.memory_model.apply({'params': p}, q)
+            
+        def retrieve_scan_body(carry, xs):
+            w, q = xs
+            v = jax.vmap(apply_model)(w, q)
+            return carry, v
+            
+        # retrieve_scan_body_ckp = jax.checkpoint(retrieve_scan_body)
         
-        # restore dims
-        values = rearrange(values, '(b h n) c d -> b h (n c) d', b=batch, h=self.heads, n=num_chunks)
+        # 4. Идем циклом (scan) по чанкам
+        _, values = jax.lax.scan(retrieve_scan_body, None, (weights_chunked, queries_chunked))
+        
+        # 5. Возвращаем размерности (n (b h) -> b h (n c))
+        values = rearrange(values, 'n (b h) c d -> b h (n c) d', b=batch, h=self.heads)
         
         values = self.multihead_rmsnorm(values)
         
