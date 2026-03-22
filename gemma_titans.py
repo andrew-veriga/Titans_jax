@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import flax
 from flax import struct
-from flax import linen as nn
+from flax import linen as flax_nn
 
 # Official Gemma framework imports
 from gemma.gm.nn import _config
@@ -23,6 +23,9 @@ from kauldron.typing import Bool, Float, Int, UInt8
 import os
 os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
+import importlib
+import titans
+importlib.reload(titans)
 
 # Import the existing Neural Memory from the project
 from titans import NeuralMemory, init_memory_state
@@ -53,8 +56,7 @@ class TitansBlock(_modules.Block):
             dim_head=64,
             chunk_size=16,
         )
-        
-        self.memory_gate = self.param('memory_gate', nn.initializers.zeros, (1,))
+        self.memory_gate = self.param('memory_gate', flax_nn.initializers.constant(-2), (1,))
 
     def __call__(
         self,
@@ -62,6 +64,9 @@ class TitansBlock(_modules.Block):
         segment_pos: jax.Array,
         cache: Optional[Dict[str, Any]],
         attn_mask: jax.Array,
+        loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА
+        **kwargs,
+        is_teacher_mode: bool = False,
     ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
         
         if cache is not None:
@@ -79,15 +84,19 @@ class TitansBlock(_modules.Block):
             attn_mask,
         )
 
-        # 2. Neural Memory (Titans) Branch
-        retrieved, next_mem_state = self.memory(
-            inputs_normalized,
-            memory_state=mem_state,
-            return_next_memories=True
-        )
-
-        # Combine Attention and Memory
-        combined_output = attn_output + jax.nn.sigmoid(self.memory_gate) * retrieved
+        if is_teacher_mode:
+            # Teacher mode: Full attention, no memory, residual
+            combined_output = attn_output
+            next_mem_state = mem_state # Memory state doesn't change in teacher mode
+        else:
+            # 2. Neural Memory (Titans) Branch (Student mode)
+            retrieved, next_mem_state = self.memory(
+                inputs_normalized,
+                memory_state=mem_state,
+                return_next_memories=True
+            )
+            # Combine Attention and Memory
+            combined_output = attn_output + jax.nn.sigmoid(self.memory_gate) * retrieved
 
         if self.post_attention_norm is not None:
             combined_output = self.post_attention_norm(combined_output)
@@ -112,11 +121,10 @@ class TitansBlock(_modules.Block):
 
         return new_cache, outputs
 
-
 @dataclasses.dataclass(frozen=True)
 class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
-    titans_layer_indices: tuple[int, ...] = (11, 15, 23)
+    titans_layer_indices: tuple[int, ...] = (5,11, 17, 23)
 
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     """Gemma3 1B with integrated Titans NLTM."""
@@ -172,7 +180,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         self.vision_encoder = self.config.vision_encoder
 
     @functools.partial(
-        nn.jit,
+        flax_nn.jit,
         static_argnames=(
             'self',
             'return_hidden_states',
@@ -186,11 +194,13 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         images: UInt8['*B N H W C'] | UInt8['*B H W C'] | None = None,
         positions: Int['*B L_with_mm'] | None = None,
         cache: Optional[Dict[str, Any]] = None,
-        attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
+        teacher_attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
+        student_attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
+        loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА
         return_hidden_states: bool | None = None,
         **kwargs,
     ) -> _transformer.Output:
-        """Forward pass - copied from base class to bypass @typechecked on cache."""
+        """Forward pass - adapted for layer-wise distillation."""
         return_last_only = self.return_last_only
 
         with _dtype_params.initialize_param_with_dtype(
@@ -202,56 +212,121 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 'lora',
             ],
         ):
+            # Encode inputs using the teacher mask as the default mask for standard layers
             inputs = self._encode_and_get_inputs(
                 tokens=tokens,
                 images=images,
                 positions=positions,
-                attention_mask=attention_mask,
+                attention_mask=teacher_attention_mask,
             )
-            del positions, attention_mask
+            del positions
 
-            x, new_cache = self._apply_attention(inputs, cache)
-
-        if return_last_only:
-            last_input_token_idx = jnp.sum(inputs.inputs_mask, axis=-1) - 1
-            x = x[jnp.arange(len(x)), last_input_token_idx, ...]
-        elif images is not None:
-            x = _token_utils.remove_mm_logits(
-                logits=x,
-                tokens=tokens,
-                num_tokens_per_image=self.config.vision_encoder.num_mm_tokens_per_image,
+            x, new_cache, distill_loss = self._apply_attention(
+                inputs, 
+                cache, 
+                loss_mask,
+                student_attention_mask=student_attention_mask
             )
 
-        logits = self.embedder.decode(x)
+        class DistillationOutput:
+            def __init__(self, logits, cache, hidden_states, distill_loss):
+                self.logits = logits
+                self.cache = cache
+                self.hidden_states = hidden_states
+                self.distill_loss = distill_loss
 
-        if self.config.final_logit_softcap is not None:
-            logits /= self.config.final_logit_softcap
-            logits = jnp.tanh(logits) * self.config.final_logit_softcap
-
-        return _transformer.Output(
-            logits=logits,
+        return DistillationOutput(
+            logits=jnp.zeros((1,)), # Dummy logits to avoid decoding
             cache=None if cache is None else new_cache,
             hidden_states=x if return_hidden_states else None,
+            distill_loss=distill_loss
         )
 
     def _apply_attention(
-        self, inputs: _transformer._Inputs, cache: Optional[Dict[str, Any]]
-    ) -> tuple[jax.Array, Dict[str, Any]]:
+        self, 
+        inputs: _transformer._Inputs, 
+        cache: Optional[Dict[str, Any]],
+        loss_mask: jax.Array | None,
+        student_attention_mask: jax.Array | None = None,
+    ) -> tuple[jax.Array, Dict[str, Any], jax.Array]:
         x = inputs.embeddings
         old_cache = cache or {}
         new_cache = {}
+        total_distill_loss = 0.0
+        
+        # Build student mask if not provided
+        if student_attention_mask is None and inputs.attention_mask is not None:
+            # We assume inputs.attention_mask has shape [batch, 1, seq_len, seq_len] or similar
+            # where the last two dims are sequence lengths.
+            seq_len = x.shape[-2]
+            window = 128  # Truncated context for Student
+            
+            # Create a sliding window boolean mask [seq_len, seq_len]
+            # True where (row_idx - col_idx) < window and (row_idx >= col_idx)
+            row_idx = jnp.arange(seq_len)[:, None]
+            col_idx = jnp.arange(seq_len)[None, :]
+            sliding_window = (row_idx - col_idx) < window
+            
+            # Apply to original mask
+            s_mask = inputs.attention_mask & sliding_window
+        else:
+            s_mask = student_attention_mask if student_attention_mask is not None else inputs.attention_mask
+
         for i, block in enumerate(self.blocks):
             layer_name = f'layer_{i}'
-            layer_cache, x = block(
-                x,
-                inputs.positions,
-                old_cache.get(layer_name),
-                inputs.attention_mask,
-            )
-            new_cache[layer_name] = layer_cache
+            
+            if isinstance(block, TitansBlock):
+                # 1. Teacher Pass
+                layer_cache_teacher, out_teacher = block(
+                    x,
+                    inputs.positions,
+                    old_cache.get(layer_name),
+                    inputs.attention_mask, # teacher mask
+                    is_teacher_mode=True
+                )
+                
+                # 2. Student Pass (using the SAME input 'x')
+                layer_cache_student, out_student = block(
+                    x,
+                    inputs.positions,
+                    old_cache.get(layer_name),
+                    s_mask,
+                    is_teacher_mode=False
+                )
+                
+                # 3. Layer Loss
+                # Считаем квадрат разницы (форма: [batch, seq_len, dim])
+                raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
+                
+                # Применяем маску из датасета (чтобы учиться только на ответах)
+                if loss_mask is not None:
+                    # loss_mask имеет форму [batch, seq_len]. 
+                    # Добавляем ось dim в конец, чтобы формы совпали для умножения:
+                    # [batch, seq_len, 1] * [batch, seq_len, dim]
+                    mask_expanded = jnp.expand_dims(loss_mask, axis=-1)
+                    raw_diff = raw_diff * mask_expanded
+                
+                # Усредняем только оставшиеся (необнуленные) значения
+                layer_loss = jnp.mean(raw_diff)
+                total_distill_loss += layer_loss
+                
+                
+                # 4. Update x and cache with Teacher's output for the next layer
+                x = out_teacher
+                new_cache[layer_name] = layer_cache_teacher
+                
+            else:
+                # Standard Gemma Block
+                layer_cache, x = block(
+                    x,
+                    inputs.positions,
+                    old_cache.get(layer_name),
+                    inputs.attention_mask,
+                )
+                new_cache[layer_name] = layer_cache
             
         x = self.final_norm(x)
-        return x, new_cache
+        return x, new_cache, total_distill_loss
 
     def init_cache(
         self,

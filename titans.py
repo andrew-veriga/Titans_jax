@@ -234,10 +234,10 @@ class NeuralMemory(nn.Module):
             g = jax.vmap(self.grad_fn)(past_weights_bh, k, lr, v)
             return carry, g
 
-        scan_step_ckp = checkpoint(scan_step)
+        # scan_step_ckp = jax.checkpoint(scan_step)
 
         _, grads = jax.lax.scan(
-            scan_step_ckp,
+            scan_step,
             init=None,
             xs=(keys, adaptive_lr_chunked, values)
         )
