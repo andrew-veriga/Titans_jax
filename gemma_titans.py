@@ -132,7 +132,7 @@ class DistillationOutput:
     cache: Optional[Dict[str, Any]]
     hidden_states: Optional[jax.Array]
     layer_losses: Dict[str, jax.Array] = struct.field(default_factory=dict)
-    distill_loss: jax.Array
+
 
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     """Gemma3 1B with integrated Titans NLTM."""
@@ -229,7 +229,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             )
             del positions
 
-            x, new_cache, distill_loss = self._apply_attention(
+            x, new_cache, layer_losses = self._apply_attention(
                 inputs, 
                 cache, 
                 loss_mask,
@@ -329,7 +329,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 new_cache[layer_name] = layer_cache
             
         x = self.final_norm(x)
-        return x, new_cache, total_distill_loss
+        return x, new_cache, layer_losses
 
     def init_cache(
         self,
