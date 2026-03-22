@@ -126,6 +126,13 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
     titans_layer_indices: tuple[int, ...] = (5,11, 17, 23)
 
+@flax.struct.dataclass
+class DistillationOutput:
+    logits: jax.Array
+    cache: Optional[Dict[str, Any]]
+    hidden_states: Optional[jax.Array]
+    distill_loss: jax.Array
+
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     """Gemma3 1B with integrated Titans NLTM."""
     
@@ -199,7 +206,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА
         return_hidden_states: bool | None = None,
         **kwargs,
-    ) -> _transformer.Output:
+    ) -> DistillationOutput:
         """Forward pass - adapted for layer-wise distillation."""
         return_last_only = self.return_last_only
 
@@ -228,15 +235,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 student_attention_mask=student_attention_mask
             )
 
-        class DistillationOutput:
-            def __init__(self, logits, cache, hidden_states, distill_loss):
-                self.logits = logits
-                self.cache = cache
-                self.hidden_states = hidden_states
-                self.distill_loss = distill_loss
-
         return DistillationOutput(
-            logits=jnp.zeros((1,)), # Dummy logits to avoid decoding
+            logits=jnp.zeros((x.shape[0], 1)), # Corrected dummy logits shape: [batch, 1]
             cache=None if cache is None else new_cache,
             hidden_states=x if return_hidden_states else None,
             distill_loss=distill_loss
@@ -252,7 +252,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         x = inputs.embeddings
         old_cache = cache or {}
         new_cache = {}
-        total_distill_loss = 0.0
+        total_distill_loss = jnp.zeros((x.shape[0],))
         
         # Build student mask if not provided
         if student_attention_mask is None and inputs.attention_mask is not None:
@@ -307,7 +307,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     raw_diff = raw_diff * mask_expanded
                 
                 # Усредняем только оставшиеся (необнуленные) значения
-                layer_loss = jnp.mean(raw_diff)
+                # Use axis=(1, 2) to keep batch dimension for flatten_unflatten_batch_dim
+                layer_loss = jnp.mean(raw_diff, axis=(1, 2))
                 total_distill_loss += layer_loss
 
                 
