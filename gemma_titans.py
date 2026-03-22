@@ -65,8 +65,8 @@ class TitansBlock(_modules.Block):
         cache: Optional[Dict[str, Any]],
         attn_mask: jax.Array,
         loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА
-        **kwargs,
         is_teacher_mode: bool = False,
+        **kwargs,
     ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
         
         if cache is not None:
@@ -309,7 +309,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 # Усредняем только оставшиеся (необнуленные) значения
                 layer_loss = jnp.mean(raw_diff)
                 total_distill_loss += layer_loss
-                
+
                 
                 # 4. Update x and cache with Teacher's output for the next layer
                 x = out_teacher
