@@ -131,6 +131,7 @@ class DistillationOutput:
     logits: jax.Array
     cache: Optional[Dict[str, Any]]
     hidden_states: Optional[jax.Array]
+    layer_losses: Dict[str, jax.Array] = struct.field(default_factory=dict)
     distill_loss: jax.Array
 
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
@@ -239,7 +240,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             logits=jnp.zeros((x.shape[0], 1)), # Corrected dummy logits shape: [batch, 1]
             cache=None if cache is None else new_cache,
             hidden_states=x if return_hidden_states else None,
-            distill_loss=distill_loss
+            layer_losses=layer_losses
         )
 
     def _apply_attention(
@@ -252,7 +253,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         x = inputs.embeddings
         old_cache = cache or {}
         new_cache = {}
-        total_distill_loss = jnp.zeros((x.shape[0],))
+        layer_losses = {}
         
         # Build student mask if not provided
         if student_attention_mask is None and inputs.attention_mask is not None:
@@ -309,7 +310,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 # Усредняем только оставшиеся (необнуленные) значения
                 # Use axis=(1, 2) to keep batch dimension for flatten_unflatten_batch_dim
                 layer_loss = jnp.mean(raw_diff, axis=(1, 2))
-                total_distill_loss += layer_loss
+                
+                layer_losses[f"loss_{layer_name}"] = layer_loss
 
                 
                 # 4. Update x and cache with Teacher's output for the next layer
