@@ -21,6 +21,7 @@ from gemma.gm.vision import _token_utils
 from gemma.gm.utils import _cache_helper
 from kauldron.typing import Bool, Float, Int, UInt8
 import os
+
 os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
 import importlib
@@ -53,11 +54,17 @@ class TitansBlock(_modules.Block):
         self.memory = NeuralMemory(
             dim=self.embed_dim,
             heads=self.num_heads,
-            dim_head=64,
+            dim_head=128,
             chunk_size=16,
         )
-        self.memory_gate = self.param('memory_gate', flax_nn.initializers.constant(-2), (1,))
-
+        # self.memory_gate = self.param('memory_gate', flax_nn.initializers.constant(-2), (1,))
+        # 1152 независимых вентиля
+        self.memory_gate = self.param(
+            'memory_gate', 
+            flax_nn.initializers.constant(-2.0), 
+            (self.embed_dim,) # <-- Ключевое изменение: задаем размерность эмбеддинга
+        )
+        
     def __call__(
         self,
         x: jax.Array,
@@ -359,7 +366,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
                     heads=self.config.num_heads,
-                    dim_head=64,
+                    dim_head=128,
                     dtype=dtype
                 )
                 attn_cache['memory_state'] = mem_state
