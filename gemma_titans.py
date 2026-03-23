@@ -57,7 +57,7 @@ class TitansBlock(_modules.Block):
             dim_head=128,
             chunk_size=16,
         )
-        # self.memory_gate = self.param('memory_gate', flax_nn.initializers.constant(-2), (1,))
+        
         # 1152 независимых вентиля
         self.memory_gate = self.param(
             'memory_gate', 
@@ -71,7 +71,6 @@ class TitansBlock(_modules.Block):
         segment_pos: jax.Array,
         cache: Optional[Dict[str, Any]],
         attn_mask: jax.Array,
-        loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА
         is_teacher_mode: bool = False,
         **kwargs,
     ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
@@ -131,7 +130,7 @@ class TitansBlock(_modules.Block):
 @dataclasses.dataclass(frozen=True)
 class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
-    titans_layer_indices: tuple[int, ...] = (5,11, 17, 23)
+    titans_layer_indices: tuple[int, ...] = (5, 11, 17, 23)
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -142,7 +141,7 @@ class DistillationOutput:
 
 
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
-    """Gemma3 1B with integrated Titans NLTM."""
+    """Gemma3 1B with integrated Titans NLTM (Bimodal: Training & Inference)."""
     
     config: Gemma_Titans_Config = Gemma_Titans_Config(
         **{f.name: getattr(_gemma.Gemma3_1B.config, f.name) 
@@ -209,14 +208,16 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         images: UInt8['*B N H W C'] | UInt8['*B H W C'] | None = None,
         positions: Int['*B L_with_mm'] | None = None,
         cache: Optional[Dict[str, Any]] = None,
-        teacher_attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
-        student_attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
-        loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА
+        attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
+        loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА ДЛЯ ОБУЧЕНИЯ
         return_hidden_states: bool | None = None,
         **kwargs,
-    ) -> DistillationOutput:
-        """Forward pass - adapted for layer-wise distillation."""
+    ) -> Union[DistillationOutput, _transformer.Output]:
+        """Forward pass - automatically switches between Meta-Training and Inference."""
         return_last_only = self.return_last_only
+        
+        # MАРКЕР РЕЖИМА: Если есть loss_mask, значит мы в цикле тренировки Kauldron
+        is_training = loss_mask is not None
 
         with _dtype_params.initialize_param_with_dtype(
             self.dtype,
@@ -227,105 +228,129 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 'lora',
             ],
         ):
-            # Encode inputs using the teacher mask as the default mask for standard layers
             inputs = self._encode_and_get_inputs(
                 tokens=tokens,
                 images=images,
                 positions=positions,
-                attention_mask=teacher_attention_mask,
+                attention_mask=attention_mask,
             )
-            del positions
+            del positions, attention_mask
 
             x, new_cache, layer_losses = self._apply_attention(
                 inputs, 
                 cache, 
-                loss_mask,
-                student_attention_mask=student_attention_mask
+                loss_mask=loss_mask,
+                is_training=is_training
             )
 
-        return DistillationOutput(
-            logits=jnp.zeros((x.shape[0], 1)), # Corrected dummy logits shape: [batch, 1]
-            cache=None if cache is None else new_cache,
-            hidden_states=x if return_hidden_states else None,
-            layer_losses=layer_losses
-        )
+        if is_training:
+            # РЕЖИМ ТРЕНИРОВКИ (Дистилляция)
+            # Отключаем декодер логитов для экономии памяти (сохраняем ~16GB HBM)
+            return DistillationOutput(
+                logits=jnp.zeros((x.shape[0], 1)), # Заглушка
+                cache=None if cache is None else new_cache,
+                hidden_states=x if return_hidden_states else None,
+                layer_losses=layer_losses
+            )
+        else:
+            # РЕЖИМ ИНФЕРЕНСА (Генерация текста)
+            if return_last_only:
+                last_input_token_idx = jnp.sum(inputs.inputs_mask, axis=-1) - 1
+                x = x[jnp.arange(len(x)), last_input_token_idx, ...]
+            elif images is not None:
+                x = _token_utils.remove_mm_logits(
+                    logits=x,
+                    tokens=tokens,
+                    num_tokens_per_image=self.config.vision_encoder.num_mm_tokens_per_image,
+                )
+
+            # Честно вычисляем предсказания словаря
+            logits = self.embedder.decode(x)
+
+            if self.config.final_logit_softcap is not None:
+                logits /= self.config.final_logit_softcap
+                logits = jnp.tanh(logits) * self.config.final_logit_softcap
+
+            return _transformer.Output(
+                logits=logits,
+                cache=None if cache is None else new_cache,
+                hidden_states=x if return_hidden_states else None,
+            )
 
     def _apply_attention(
         self, 
         inputs: _transformer._Inputs, 
         cache: Optional[Dict[str, Any]],
         loss_mask: jax.Array | None,
-        student_attention_mask: jax.Array | None = None,
-    ) -> tuple[jax.Array, Dict[str, Any], jax.Array]:
+        is_training: bool,
+    ) -> tuple[jax.Array, Dict[str, Any], Dict[str, jax.Array]]:
         x = inputs.embeddings
         old_cache = cache or {}
         new_cache = {}
         layer_losses = {}
         
-        # Build student mask if not provided
-        if student_attention_mask is None and inputs.attention_mask is not None:
-            # We assume inputs.attention_mask has shape [batch, 1, seq_len, seq_len] or similar
-            # where the last two dims are sequence lengths.
+        # Build student mask (truncated window)
+        if inputs.attention_mask is not None:
             seq_len = x.shape[-2]
             window = 128  # Truncated context for Student
             
-            # Create a sliding window boolean mask [seq_len, seq_len]
-            # True where (row_idx - col_idx) < window and (row_idx >= col_idx)
             row_idx = jnp.arange(seq_len)[:, None]
             col_idx = jnp.arange(seq_len)[None, :]
             sliding_window = (row_idx - col_idx) < window
             
-            # Apply to original mask
             s_mask = inputs.attention_mask & sliding_window
         else:
-            s_mask = student_attention_mask if student_attention_mask is not None else inputs.attention_mask
+            s_mask = None
 
         for i, block in enumerate(self.blocks):
             layer_name = f'layer_{i}'
             
             if isinstance(block, TitansBlock):
-                # 1. Teacher Pass
-                layer_cache_teacher, out_teacher = block(
-                    x,
-                    inputs.positions,
-                    old_cache.get(layer_name),
-                    inputs.attention_mask, # teacher mask
-                    is_teacher_mode=True
-                )
-                
-                # 2. Student Pass (using the SAME input 'x')
-                layer_cache_student, out_student = block(
-                    x,
-                    inputs.positions,
-                    old_cache.get(layer_name),
-                    s_mask,
-                    is_teacher_mode=False
-                )
-                
-                # 3. Layer Loss
-                # Считаем квадрат разницы (форма: [batch, seq_len, dim])
-                raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
-                
-                # Применяем маску из датасета (чтобы учиться только на ответах)
-                if loss_mask is not None:
-                    # loss_mask имеет форму [batch, seq_len]. 
-                    # Добавляем ось dim в конец, чтобы формы совпали для умножения:
-                    # [batch, seq_len, 1] * [batch, seq_len, dim]
-                    mask_expanded = jnp.expand_dims(loss_mask, axis=-1)
-                    raw_diff = raw_diff * mask_expanded
-                
-                # Усредняем только оставшиеся (необнуленные) значения
-                # Use axis=(1, 2) to keep batch dimension for flatten_unflatten_batch_dim
-                layer_loss = jnp.mean(raw_diff, axis=(1, 2),dtype=jnp.float32)
-                
-                layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
-                # Для визуального контроля 
-                layer_losses[f"raw_mse_{layer_name}"] = layer_loss
-                
-                # 4. Update x and cache with Teacher's output for the next layer
-                x = out_teacher
-                new_cache[layer_name] = layer_cache_teacher
-                
+                if is_training:
+                    # 1. Teacher Pass (Full context)
+                    layer_cache_teacher, out_teacher = block(
+                        x,
+                        inputs.positions,
+                        old_cache.get(layer_name),
+                        inputs.attention_mask, # teacher mask
+                        is_teacher_mode=True
+                    )
+                    
+                    # 2. Student Pass (Truncated context, using the SAME input 'x')
+                    layer_cache_student, out_student = block(
+                        x,
+                        inputs.positions,
+                        old_cache.get(layer_name),
+                        s_mask, # student mask
+                        is_teacher_mode=False
+                    )
+                    
+                    # 3. Layer Loss
+                    raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
+                    
+                    if loss_mask is not None:
+                        mask_expanded = jnp.expand_dims(loss_mask, axis=-1)
+                        raw_diff = raw_diff * mask_expanded
+                    
+                    layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
+                    
+                    layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
+                    layer_losses[f"raw_mse_{layer_name}"] = layer_loss
+                    
+                    # 4. Update x with Teacher's output to prevent Exposure Bias
+                    x = out_teacher
+                    new_cache[layer_name] = layer_cache_teacher
+                else:
+                    # INFERENCE MODE: Only run Student Pass
+                    layer_cache_student, out_student = block(
+                        x,
+                        inputs.positions,
+                        old_cache.get(layer_name),
+                        s_mask, # student mask
+                        is_teacher_mode=False
+                    )
+                    x = out_student
+                    new_cache[layer_name] = layer_cache_student
             else:
                 # Standard Gemma Block
                 layer_cache, x = block(
