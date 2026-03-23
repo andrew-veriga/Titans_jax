@@ -309,7 +309,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 
                 # Усредняем только оставшиеся (необнуленные) значения
                 # Use axis=(1, 2) to keep batch dimension for flatten_unflatten_batch_dim
-                layer_loss = jnp.mean(raw_diff, axis=(1, 2))
+                layer_loss = jnp.mean(raw_diff, axis=(1, 2),dtype=jnp.float32)
                 
                 layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
                 # Для визуального контроля 
