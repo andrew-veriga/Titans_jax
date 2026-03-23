@@ -311,8 +311,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 # Use axis=(1, 2) to keep batch dimension for flatten_unflatten_batch_dim
                 layer_loss = jnp.mean(raw_diff, axis=(1, 2))
                 
-                layer_losses[f"loss_{layer_name}"] = layer_loss
-
+                layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
+                        # Для визуального контроля (Пойдет в метрики)
+                layer_losses[f"raw_mse_{layer_name}"] = layer_loss
                 
                 # 4. Update x and cache with Teacher's output for the next layer
                 x = out_teacher
