@@ -203,7 +203,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     @_jax_utils.flatten_unflatten_batch_dim()
     def __call__(
         self,
-        tokens: Int['*B L'],
+        input: Int['*B L'],
         *,
         images: UInt8['*B N H W C'] | UInt8['*B H W C'] | None = None,
         positions: Int['*B L_with_mm'] | None = None,
@@ -229,7 +229,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             ],
         ):
             inputs = self._encode_and_get_inputs(
-                tokens=tokens,
+                tokens=input,
                 images=images,
                 positions=positions,
                 attention_mask=attention_mask,
