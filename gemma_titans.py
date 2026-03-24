@@ -131,6 +131,7 @@ class TitansBlock(_modules.Block):
 class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
     titans_layer_indices: tuple[int, ...] = (5, 11, 17, 23)
+    is_training_mode: bool = True
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -209,7 +210,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         positions: Int['*B L_with_mm'] | None = None,
         cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
-        loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА ДЛЯ ОБУЧЕНИЯ
+        # loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА ДЛЯ ОБУЧЕНИЯ
         return_hidden_states: bool | None = None,
         **kwargs,
     ) -> Union[DistillationOutput, _transformer.Output]:
@@ -217,7 +218,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         return_last_only = self.return_last_only
         
         # MАРКЕР РЕЖИМА: Если есть loss_mask, значит мы в цикле тренировки Kauldron
-        is_training = loss_mask is not None
+        is_training = self.config.is_training_mode
 
         with _dtype_params.initialize_param_with_dtype(
             self.dtype,
@@ -239,7 +240,6 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             x, new_cache, layer_losses = self._apply_attention(
                 inputs, 
                 cache, 
-                loss_mask=loss_mask,
                 is_training=is_training
             )
 
@@ -281,7 +281,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         self, 
         inputs: _transformer._Inputs, 
         cache: Optional[Dict[str, Any]],
-        loss_mask: jax.Array | None,
+        # loss_mask: jax.Array | None,
         is_training: bool,
     ) -> tuple[jax.Array, Dict[str, Any], Dict[str, jax.Array]]:
         x = inputs.embeddings
@@ -328,10 +328,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     # 3. Layer Loss
                     raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
                     
-                    if loss_mask is not None:
-                        # mask_expanded = jnp.expand_dims(loss_mask, axis=-1)
-                        safe_mask = loss_mask.reshape(x.shape[0], x.shape[1], 1)
-                        raw_diff = raw_diff * safe_mask
+                    # if loss_mask is not None:
+                    #   safe_mask = loss_mask.reshape(x.shape[0], x.shape[1], 1)
+                    #   raw_diff = raw_diff * safe_mask
                     
                     layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
                     
