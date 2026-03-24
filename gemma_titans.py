@@ -343,7 +343,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 else:
                     # INFERENCE MODE: Only run Student Pass
                     layer_cache_student, out_student = block(
-                        x,
+                        jax.lax.stop_gradient(x),
                         inputs.positions,
                         old_cache.get(layer_name),
                         s_mask, # student mask
