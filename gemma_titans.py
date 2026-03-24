@@ -329,8 +329,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
                     
                     if loss_mask is not None:
-                        mask_expanded = jnp.expand_dims(loss_mask, axis=-1)
-                        raw_diff = raw_diff * mask_expanded
+                        # mask_expanded = jnp.expand_dims(loss_mask, axis=-1)
+                        safe_mask = loss_mask.reshape(x.shape[0], x.shape[1], 1)
+                        raw_diff = raw_diff * safe_mask
                     
                     layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
                     
