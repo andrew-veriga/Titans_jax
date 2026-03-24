@@ -55,7 +55,7 @@ class TitansBlock(_modules.Block):
             dim=self.embed_dim,
             heads=self.num_heads,
             dim_head=256, # фиксированная размерность головы для памяти
-            chunk_size=32,
+            chunk_size=32 # размерность чанка для обработки памяти (можно настроить)
         )
         
         # 1152 независимых вентиля
