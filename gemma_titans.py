@@ -54,7 +54,7 @@ class TitansBlock(_modules.Block):
         self.memory = NeuralMemory(
             dim=self.embed_dim,
             heads=self.num_heads,
-            dim_head=128,
+            dim_head=256, # фиксированная размерность головы для памяти
             chunk_size=16,
         )
         
@@ -187,7 +187,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             if i in self.config.titans_layer_indices:
                 blocks.append(TitansBlock(**block_kwargs))
             else:
-                blocks.append(_modules.Block(**block_kwargs))
+                blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
                 
         self.blocks = blocks
         self.final_norm = _layers.RMSNorm()
@@ -318,7 +318,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     
                     # 2. Student Pass (Truncated context, using the SAME input 'x')
                     layer_cache_student, out_student = block(
-                        x,
+                        jax.lax.stop_gradient(x),
                         inputs.positions,
                         old_cache.get(layer_name),
                         s_mask, # student mask
@@ -391,7 +391,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
                     heads=self.config.num_heads,
-                    dim_head=128,
+                    dim_head=256,
                     dtype=dtype
                 )
                 attn_cache['memory_state'] = mem_state
