@@ -282,7 +282,9 @@ class NeuralMemory(nn.Module):
         last_update = jax.tree_util.tree_map(lambda t: t[:, :, -1], updates)
         next_weights = jax.tree_util.tree_map(lambda p, u: p + u, past_weights, last_update)
         
-        return updates, (next_weights, next_momentum)
+        last_momentum = jax.tree_util.tree_map(lambda t: t[:, :, -1], next_momentum)
+        
+        return updates, (next_weights, last_momentum)
 
     def retrieve_memories(self, seq, weights_with_updates):
         batch, seq_len = seq.shape[:2]
