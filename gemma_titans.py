@@ -56,6 +56,7 @@ class TitansBlock(_modules.Block):
             heads=self.num_heads,
             dim_head=256, # фиксированная размерность головы для памяти
             chunk_size=32 # размерность чанка для обработки памяти (можно настроить)
+            max_grad_norm=1.0 # для стабильности обучения
         )
         
         # 1152 независимых вентиля
@@ -147,6 +148,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     config: Gemma_Titans_Config = Gemma_Titans_Config(
         **{f.name: getattr(_gemma.Gemma3_1B.config, f.name) 
            for f in dataclasses.fields(_config.TransformerConfig)}
+
     )
 
     def setup(self):
