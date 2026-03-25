@@ -184,6 +184,10 @@ class NeuralMemory(nn.Module):
         return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth, dtype=dtype)
 
     def store_memories(self, seq, past_state):
+        """
+        реализует механизм ассоциативной памяти, 
+        где веса модели обновляются на лету на основе входной последовательности
+        """
         batch = seq.shape[0]
         seq = self.store_norm(seq)
         
