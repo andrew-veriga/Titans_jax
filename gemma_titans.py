@@ -189,8 +189,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             if i in self.config.titans_layer_indices:
                 blocks.append(TitansBlock(**block_kwargs))
             else:
-                blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
-                
+                # blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
+                blocks.append(_modules.Block(**block_kwargs))
         self.blocks = blocks
         self.final_norm = _layers.RMSNorm()
 
