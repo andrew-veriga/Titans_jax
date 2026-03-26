@@ -13,3 +13,5 @@ GemmaTitans_Distillation_Migration_Plan.md
 context_spec.txt
 gemma_titans_train_backup.py
 metadata.json
+saved_titans_delta/
+titans_workdir_squad/
