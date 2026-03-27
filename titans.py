@@ -220,6 +220,11 @@ class NeuralMemory(nn.Module):
         self.to_keys_values = nn.Dense(dim_inner * 2, use_bias=False)
 
         self.to_momentum = nn.Dense(self.heads, use_bias=False)
+
+        mlp_depth = 2
+        if exists(self.default_mlp_kwargs):
+            mlp_depth = self.default_mlp_kwargs.get('depth', 2)
+
         self.to_adaptive_step = nn.Dense(self.heads * mlp_depth, use_bias=False)
         self.to_decay_factor = nn.Dense(self.heads, use_bias=False)
 
@@ -343,7 +348,9 @@ class NeuralMemory(nn.Module):
             
             # Применяем: expanding dims, чтобы скаляр (batch*heads, 1, 1) умножился на матрицу (batch*heads, dim, dim)
             for i in range(mlp_depth):
-                g['params'][f'weight_{i}'] = g['params'][f'weight_{i}'] * lr_mean[:, i][:, None, None]
+                g[f'weight_{i}'] = g[f'weight_{i}'] * lr_mean[:, i][:, None, None]
+
+            return carry, g
 
             return carry, g
 
