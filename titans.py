@@ -220,16 +220,15 @@ class NeuralMemory(nn.Module):
         self.to_keys_values = nn.Dense(dim_inner * 2, use_bias=False)
 
         self.to_momentum = nn.Dense(self.heads, use_bias=False)
-        self.to_adaptive_step = nn.Dense(self.heads, use_bias=False)
+        self.to_adaptive_step = nn.Dense(self.heads * mlp_depth, use_bias=False)
         self.to_decay_factor = nn.Dense(self.heads, use_bias=False)
 
         self.empty_memory_embed = self.param('empty_memory_embed', nn.initializers.normal(stddev=0.02), (self.dim,))
 
         # prepare per sample grad fn
-        def forward_and_loss(params, inputs, loss_weights, target):
+        def forward_and_loss(params, inputs, target):
             pred = self.memory_model.apply({'params': params}, inputs)
             loss = self.store_memory_loss_fn(pred, target)
-            loss = loss * loss_weights
             return loss.sum()
 
         self.grad_fn = jax.grad(forward_and_loss)
@@ -266,7 +265,7 @@ class NeuralMemory(nn.Module):
         
         # adaptive lr, momentum, decay
         adaptive_lr = self.to_adaptive_step(seq)
-        adaptive_lr = rearrange(adaptive_lr, 'b n h -> b h n')
+        adaptive_lr = rearrange(adaptive_lr, 'b n (h d) -> b h n d', h=self.heads)
         adaptive_lr = self.adaptive_step_transform(adaptive_lr)
 
         # momentum and decay factor need to be averaged within chunk
@@ -318,7 +317,7 @@ class NeuralMemory(nn.Module):
         # chunking
         keys = rearrange(keys, 'b h (n c) d -> n (b h) c d', c=self.chunk_size)
         values = rearrange(values, 'b h (n c) d -> n (b h) c d', c=self.chunk_size)
-        adaptive_lr_chunked = rearrange(adaptive_lr, 'b h (n c) -> n (b h) c', c=self.chunk_size)
+        adaptive_lr_chunked = rearrange(adaptive_lr, 'b h (n c) d -> n (b h) c d', c=self.chunk_size)
 
         # Flatten weights over batch and heads to vmap inside scan
         past_weights_bh = jax.tree_util.tree_map(
@@ -327,8 +326,25 @@ class NeuralMemory(nn.Module):
         )
 
         def scan_step(carry, xs):
-            k, lr, v = xs
-            g = jax.vmap(self.grad_fn)(past_weights_bh, k, lr, v)
+            mlp_depth = 2
+            if exists(self.default_mlp_kwargs):
+                mlp_depth = self.default_mlp_kwargs.get('depth', 2)
+            k, lr, v = xs 
+            # lr сейчас имеет форму (batch*heads, chunk_size, depth)
+            
+            # 1. Получаем сырые градиенты (PyTree словарей с 'weight_0', 'weight_1' и т.д.)
+            # Заметь: grad_fn больше не принимает lr
+            g = jax.vmap(self.grad_fn)(past_weights_bh, k, v)
+            
+            # 2. Модуляция: умножаем градиенты каждого слоя на его собственный lr.
+            # Для этого усредняем lr внутри чанка по оси 1 (chunk_size), 
+            # чтобы получить один LR для батча/головы на этот чанк (форма: batch*heads, depth)
+            lr_mean = jnp.mean(lr, axis=1)
+            
+            # Применяем: expanding dims, чтобы скаляр (batch*heads, 1, 1) умножился на матрицу (batch*heads, dim, dim)
+            for i in range(mlp_depth):
+                g['params'][f'weight_{i}'] = g['params'][f'weight_{i}'] * lr_mean[:, i][:, None, None]
+
             return carry, g
 
         # scan_step_ckp = jax.checkpoint(scan_step)
