@@ -120,6 +120,64 @@ def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[
     
     return (initial_weights, momentum)
 
+def newton_schulz_norm_matrix(x: jnp.ndarray) -> jnp.ndarray:
+    """
+    Спектральная нормализация матрицы через итерации Ньютона-Шульца (Newton-Schulz).
+    Оптимизировано для JAX/TPU. Нормализует одну 2D-матрицу.
+
+    Args:
+        x: Входная матрица апдейтов (например, сюрприз памяти).
+        steps: Количество итераций (обычно 5 достаточно для сходимости).
+        eps: Эпсилон для числовой стабильности.
+    Returns:
+        Спектрально нормализованная матрица той же размерности.
+    """
+    steps = 5
+    eps = 1e-7
+    # Для NS требуется квадратная или широкая матрица. 
+    # Если строк больше чем столбцов, транспонируем временно.
+    transposed = False
+    if x.shape[0] > x.shape[1]:
+        x = x.T
+        transposed = True
+
+    a, b, c = (1.5, -0.5, 5) # Константы из реализации Muon/Titans
+    
+    # Шаг 1: Масштабирование (делим на норму Фробениуса)
+    norm = jnp.linalg.norm(x, ord='fro')
+    x_scaled = x / (norm + eps)
+
+    # Шаг 2: Итерации Ньютона-Шульца
+    def ns_step(i, x_curr):
+        return a * x_curr + b * (x_curr @ x_curr.T @ x_curr)
+        
+    x_normalized = jax.lax.fori_loop(0, steps, ns_step, x_scaled)
+
+    # Возвращаем исходную ориентацию, если транспонировали
+    if transposed:
+        x_normalized = x_normalized.T
+        
+    return x_normalized
+
+def apply_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
+    """
+    Применяет Newton-Schulz normalization ко всем матрицам в тензоре формы (b, h, n, ...).
+    Если это bias (1D вектор на уровне параметров), просто возвращаем его или делаем L2-нормализацию.
+    """
+    # Если параметр — вектор (например, bias формы (b, h, n, d))
+    if t.ndim <= 4: 
+        # Можно оставить как есть, либо сделать L2 нормализацию
+        return t 
+            
+    # Если параметр — матрица (форма (b, h, n, d1, d2))
+    elif t.ndim == 5:
+        # Трижды применяем vmap, чтобы "провалиться" сквозь batch, heads и chunks
+        # и применить NS непосредственно к матрице (d1, d2)
+        vmap_ns = jax.vmap(jax.vmap(jax.vmap(newton_schulz_norm_matrix, in_axes=0), in_axes=0), in_axes=0)
+        return vmap_ns(t)
+    
+    return t
+
 class NeuralMemory(nn.Module):
     dim: int
     chunk_size: int = 1
@@ -258,8 +316,11 @@ class NeuralMemory(nn.Module):
         # restore batch, heads and seq dim
         grads = jax.tree_util.tree_map(lambda t: rearrange(t, '(b h n) ... -> b h n ...', b=batch, h=self.heads, n=num_chunks), grads)
         
-        # surprises
-        surprises = jax.tree_util.tree_map(lambda t: -t, grads)
+        # Сначала получаем "сырые" сюрпризы (инвертированные градиенты)
+        raw_surprises = jax.tree_util.tree_map(lambda t: -t, grads)
+
+        # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам
+        surprises = jax.tree_util.tree_map(apply_ns_to_tensor, raw_surprises)
 
         # associative scan
         next_momentum = {}
