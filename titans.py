@@ -329,6 +329,7 @@ class NeuralMemory(nn.Module):
             lambda t: rearrange(t, 'b h ... -> (b h) ...'),
             past_weights
         )
+        
 
         def scan_step(carry, xs):
             mlp_depth = 2
