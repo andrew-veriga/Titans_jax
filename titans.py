@@ -234,6 +234,14 @@ class NeuralMemory(nn.Module):
 
         self.grad_fn = jax.grad(forward_and_loss)
 
+        # attention pooling для получения весов внутри чанков для momentum и decay factor:
+        self.chunk_attn_pool = nn.Sequential([
+            nn.Dense(self.dim // 4, use_bias=False), # Сжатие для экономии параметров
+            nn.silu,
+            nn.Dense(1, use_bias=False) # Выдает 1 скаляр-вес на каждый токен
+        ])
+
+
     def init_state(self, batch_size: int, *, dtype: Any):
         mlp_depth = 2
         if exists(self.default_mlp_kwargs):
@@ -262,7 +270,19 @@ class NeuralMemory(nn.Module):
 
         # momentum and decay factor need to be averaged within chunk
         seq_chunked = rearrange(seq, 'b (n c) d -> b n c d', c=self.chunk_size)
-        seq_mean = jnp.mean(seq_chunked, axis=2)
+        
+        # seq_mean = jnp.mean(seq_chunked, axis=2)
+
+        ##### attention pooling #########
+        # 1. Считаем сырые веса для каждого токена (b, n, c, 1)
+        attn_logits = self.chunk_attn_pool(seq_chunked) 
+
+        # 2. Нормализуем их внутри чанка (softmax вдоль оси токенов 'c')
+        attn_weights = jax.nn.softmax(attn_logits, axis=2) 
+
+        # 3. Взвешенная сумма вместо простого среднего
+        seq_mean = jnp.sum(seq_chunked * attn_weights, axis=2)
+        ###################################################
         
         adaptive_momentum = jax.nn.sigmoid(self.to_momentum(seq_mean))
         adaptive_momentum = rearrange(adaptive_momentum, 'b n h -> b h n 1')
