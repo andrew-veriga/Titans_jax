@@ -344,7 +344,7 @@ class NeuralMemory(nn.Module):
             # 2. Модуляция: умножаем градиенты каждого слоя на его собственный lr.
             # Для этого усредняем lr внутри чанка по оси 1 (chunk_size), 
             # чтобы получить один LR для батча/головы на этот чанк (форма: batch*heads, depth)
-            lr_mean = jnp.mean(lr, axis=1)
+            lr_mean = jnp.mean(lr, axis=1)   
             
             # Применяем: expanding dims, чтобы скаляр (batch*heads, 1, 1) умножился на матрицу (batch*heads, dim, dim)
             for i in range(mlp_depth):
