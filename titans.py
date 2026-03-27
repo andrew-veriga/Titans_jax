@@ -278,6 +278,18 @@ class NeuralMemory(nn.Module):
         keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.heads)
         values = rearrange(values, 'b n (h d) -> b h n d', h=self.heads)
         
+        # --- ВНЕДРЕНИЕ VALUE LOOKAHEAD ---
+        # Сдвигаем значения на 1 токен в будущее вдоль оси seq_len (ось 2)
+        values_next = values[:, :, 1:, :]
+        # Паддим последний токен нулями (или можно задублировать последний)
+        zeros_pad = jnp.zeros_like(values[:, :, -1:, :])
+        values_lookahead = jnp.concatenate([values_next, zeros_pad], axis=2)
+        
+        # Крайне важно: stop_gradient! Мы хотим обновить только память, 
+        # а не менять способ генерации эталонного value базовой моделью.
+        values = jax.lax.stop_gradient(values_lookahead)
+        # ---------------------------------
+
         num_chunks = round_down_seq_len // self.chunk_size
 
         # chunking
@@ -317,10 +329,10 @@ class NeuralMemory(nn.Module):
         grads = jax.tree_util.tree_map(lambda t: rearrange(t, '(b h n) ... -> b h n ...', b=batch, h=self.heads, n=num_chunks), grads)
         
         # Сначала получаем "сырые" сюрпризы (инвертированные градиенты)
-        raw_surprises = jax.tree_util.tree_map(lambda t: -t, grads)
+        surprises = jax.tree_util.tree_map(lambda t: -t, grads)
 
-        # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам
-        surprises = jax.tree_util.tree_map(apply_ns_to_tensor, raw_surprises)
+        # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам (нет)
+        # surprises = jax.tree_util.tree_map(apply_ns_to_tensor, surprises)
 
         # associative scan
         next_momentum = {}
