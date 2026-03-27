@@ -237,19 +237,10 @@ class NeuralMemory(nn.Module):
         # attention pooling для получения весов внутри чанков для momentum и decay factor:
         pool_hidden_dim = self.dim // 4
         
-        # Первая матрица (W1)
-        self.pool_w1 = self.param(
-            'chunk_pool_w1', 
-            nn.initializers.normal(stddev=0.02), 
-            (self.dim, pool_hidden_dim)
-        )
-        
-        # Вторая матрица (W2)
-        self.pool_w2 = self.param(
-            'chunk_pool_w2', 
-            nn.initializers.normal(stddev=0.02), 
-            (pool_hidden_dim, 1)
-        )
+        # Объявляем слои для attention pooling как атрибуты модуля
+        pool_hidden_dim = self.dim // 4
+        self.chunk_pool_layer1 = nn.Dense(pool_hidden_dim, use_bias=False)
+        self.chunk_pool_layer2 = nn.Dense(1, use_bias=False)
 
 
     def init_state(self, batch_size: int, *, dtype: Any):
@@ -284,11 +275,10 @@ class NeuralMemory(nn.Module):
         # seq_mean = jnp.mean(seq_chunked, axis=2)
 
         ##### attention pooling #########
-        # 1. Считаем сырые веса для каждого токена (b, n, c, 1)
-        # Ручной проход вместо self.chunk_attn_pool
-        hidden = seq_chunked @ self.pool_w1
+        # 1. Пропускаем токены через слои
+        hidden = self.chunk_pool_layer1(seq_chunked)
         hidden = nn.silu(hidden)
-        attn_logits = hidden @ self.pool_w2
+        attn_logits = self.chunk_pool_layer2(hidden)
 
         # 2. Нормализуем их внутри чанка (softmax вдоль оси токенов 'c')
         attn_weights = jax.nn.softmax(attn_logits, axis=2) 
