@@ -166,37 +166,51 @@ def apply_fast_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
     Работает мгновенно благодаря нативному батчингу jnp.matmul и слиянию графа XLA.
     """
     """
-    Векторизованная и сверхбыстрая версия Newton-Schulz.
-    Использует классические коэффициенты для строгой ортогонализации (max singular value == 1.0).
+    Сверхбыстрая версия Newton-Schulz для TPU/GPU.
+    Использует сплющивание в 3D, вычисления в bfloat16 и развернутый цикл.
     """
+    steps= 5
+    eps = 1e-7
     # Если тензор меньше 5D (например, одномерные векторы bias), возвращаем как есть
     if t.ndim < 5:
         return t
-    steps = 5
-    eps = 1e-7
-    # Транспонируем последние 2 размерности, если строк больше столбцов
-    should_transpose = t.shape[-2] > t.shape[-1]
-    if should_transpose:
-        t = jnp.swapaxes(t, -1, -2)
         
-    # Нормализация Фробениуса
-    norm = jnp.linalg.norm(t, ord='fro', axis=(-2, -1), keepdims=True)
-    t = t / jnp.maximum(norm, eps)
+    orig_shape = t.shape
+    d1, d2 = orig_shape[-2], orig_shape[-1]
     
-    # Классические коэффициенты (сводят сингулярные числа ровно к 1.0)
+    # 1. СПЛЮЩИВАНИЕ В 3D: (b, h, n, d1, d2) -> (N, d1, d2)
+    # Это решает проблему медленного 5D Batched GEMM в JAX
+    t_3d = t.reshape(-1, d1, d2)
+    
+    # Транспонируем, если строк больше, чем столбцов
+    should_transpose = d1 > d2
+    if should_transpose:
+        t_3d = jnp.swapaxes(t_3d, -1, -2)
+        
+    # 2. КАСТ В BFLOAT16: Критически ускоряет умножения матриц на TPU/GPU
+    orig_dtype = t_3d.dtype
+    t_3d = t_3d.astype(jnp.bfloat16)
+    
+    # Нормализация Фробениуса
+    norm = jnp.linalg.norm(t_3d, ord='fro', axis=(-2, -1), keepdims=True)
+    t_3d = t_3d / jnp.maximum(norm, eps)
+    
+    # Классические коэффициенты для ортогонализации
     a, b = 1.5, -0.5
     
-    # Развернутый цикл: XLA сольет эти операции в один быстрый блок
-    # Оператор @ нативно перемножает матрицы по последним двум осям для всего батча сразу
+    # 3. РАЗВЕРНУТЫЙ ЦИКЛ: XLA сольет эти операции в один быстрый блок
+    # Цикл работает только с 3D-тензорами в bfloat16
     for _ in range(steps):
-        A = t @ jnp.swapaxes(t, -1, -2)
-        t = a * t + b * (A @ t)
+        A = t_3d @ jnp.swapaxes(t_3d, -1, -2)
+        t_3d = a * t_3d + b * (A @ t_3d)
         
     # Возвращаем исходную ориентацию
     if should_transpose:
-        t = jnp.swapaxes(t, -1, -2)
+        t_3d = jnp.swapaxes(t_3d, -1, -2)
         
-    return t
+    # Возвращаем исходную точность (float32) и исходную форму 5D
+    t_3d = t_3d.astype(orig_dtype)
+    return t_3d.reshape(orig_shape)
 
 def apply_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
     """
