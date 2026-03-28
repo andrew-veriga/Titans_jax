@@ -47,6 +47,7 @@ if not hasattr(_cache_helper._set_cache, '_is_titans_patched'):
 
 class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
+    diff_view: bool = False
     
     def setup(self):
         super().setup()
@@ -56,7 +57,8 @@ class TitansBlock(_modules.Block):
             heads=self.num_heads,
             dim_head=256, # фиксированная размерность головы для памяти
             chunk_size=32, # размерность чанка для обработки памяти (можно настроить)
-            max_grad_norm=0.5 # для стабильности обучения
+            max_grad_norm=0.5, # для стабильности обучения
+            diff_view=self.diff_view
         )
         
         # 1152 независимых вентиля
@@ -73,6 +75,7 @@ class TitansBlock(_modules.Block):
         cache: Optional[Dict[str, Any]],
         attn_mask: jax.Array,
         is_teacher_mode: bool = False,
+        kv_seq: Optional[jax.Array] = None,
         **kwargs,
     ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
         
@@ -97,10 +100,12 @@ class TitansBlock(_modules.Block):
             next_mem_state = mem_state # Memory state doesn't change in teacher mode
         else:
             # 2. Neural Memory (Titans) Branch (Student mode)
+            # If diff_view is enabled, kv_seq contains the output of previous layer
             retrieved, next_mem_state = self.memory(
                 inputs_normalized,
                 memory_state=mem_state,
-                return_next_memories=True
+                return_next_memories=True,
+                kv_seq=kv_seq
             )
             # Combine Attention and Memory
             combined_output = attn_output + jax.nn.sigmoid(self.memory_gate) * retrieved
@@ -133,6 +138,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
     titans_layer_indices: tuple[int, ...] = (5, 11, 17, 23)
     is_training_mode: bool = True
+    neural_mem_qkv_receives_diff_view: bool = True
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -187,7 +193,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             )
             
             if i in self.config.titans_layer_indices:
-                blocks.append(TitansBlock(**block_kwargs))
+                blocks.append(TitansBlock(
+                    **block_kwargs,
+                    diff_view=self.config.neural_mem_qkv_receives_diff_view
+                ))
             else:
                 # blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
                 blocks.append(_modules.Block(**block_kwargs))
@@ -287,6 +296,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         is_training: bool,
     ) -> tuple[jax.Array, Dict[str, Any], Dict[str, jax.Array]]:
         x = inputs.embeddings
+        # Track previous layer output for hyper-connections (diff view)
+        x_prev = x
+        
         old_cache = cache or {}
         new_cache = {}
         layer_losses = {}
@@ -315,7 +327,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         inputs.positions,
                         old_cache.get(layer_name),
                         inputs.attention_mask, # teacher mask
-                        is_teacher_mode=True
+                        is_teacher_mode=True,
+                        kv_seq=x_prev if block.diff_view else None
                     )
                     
                     # 2. Student Pass (Truncated context, using the SAME input 'x')
@@ -324,7 +337,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         inputs.positions,
                         old_cache.get(layer_name),
                         s_mask, # student mask
-                        is_teacher_mode=False
+                        is_teacher_mode=False,
+                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None
                     )
                     
                     # 3. Layer Loss
@@ -340,6 +354,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     layer_losses[f"raw_mse_{layer_name}"] = layer_loss
                     
                     # 4. Update x with Teacher's output to prevent Exposure Bias
+                    x_prev = x
                     x = out_teacher
                     new_cache[layer_name] = layer_cache_teacher
                 else:
@@ -349,18 +364,22 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         inputs.positions,
                         old_cache.get(layer_name),
                         s_mask, # student mask
-                        is_teacher_mode=False
+                        is_teacher_mode=False,
+                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None
                     )
+                    x_prev = x
                     x = out_student
                     new_cache[layer_name] = layer_cache_student
             else:
                 # Standard Gemma Block
-                layer_cache, x = block(
+                layer_cache, out_next = block(
                     x,
                     inputs.positions,
                     old_cache.get(layer_name),
                     inputs.attention_mask,
                 )
+                x_prev = x
+                x = out_next
                 new_cache[layer_name] = layer_cache
             
         x = self.final_norm(x)

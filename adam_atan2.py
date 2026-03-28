@@ -1,5 +1,5 @@
 import functools
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional, Any
 
 import jax
 import jax.numpy as jnp

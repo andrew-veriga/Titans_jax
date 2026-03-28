@@ -243,6 +243,7 @@ class NeuralMemory(nn.Module):
     post_rmsnorm: bool = True
     max_grad_norm: Optional[float] = None
     default_mlp_kwargs: dict = None
+    diff_view: bool = False
 
     def setup(self):
         dim_head = default(self.dim_head, self.dim // self.heads if self.dim_head is None else self.dim_head)
@@ -307,7 +308,7 @@ class NeuralMemory(nn.Module):
             
         return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth, dtype=dtype)
 
-    def store_memories(self, seq, past_state):
+    def store_memories(self, seq, past_state, kv_seq=None):
         """
         реализует механизм ассоциативной памяти, 
         где веса модели обновляются на лету на основе входной последовательности
@@ -315,9 +316,14 @@ class NeuralMemory(nn.Module):
         batch = seq.shape[0]
         seq = self.store_norm(seq)
         
+        kv_seq = default(kv_seq, seq)
+        if self.diff_view:
+            kv_seq = self.store_norm(kv_seq)
+
         seq_len = seq.shape[1]
         round_down_seq_len = round_down_multiple(seq_len, self.chunk_size)
         seq = seq[:, :round_down_seq_len]
+        kv_seq = kv_seq[:, :round_down_seq_len]
 
         past_weights, past_momentum = past_state
         
@@ -350,8 +356,8 @@ class NeuralMemory(nn.Module):
         decay_factor = jax.nn.sigmoid(self.to_decay_factor(seq_mean))
         decay_factor = rearrange(decay_factor, 'b n h -> b h n 1')
 
-        # keys and values
-        kv = self.to_keys_values(seq)
+        # keys and values (extracted from kv_seq if diff_view is True)
+        kv = self.to_keys_values(kv_seq)
         keys, values = jnp.split(kv, 2, axis=-1)
 
         # multi head
@@ -406,8 +412,6 @@ class NeuralMemory(nn.Module):
 
             return carry, g
 
-            return carry, g
-
         # scan_step_ckp = jax.checkpoint(scan_step)
 
         _, grads = jax.lax.scan(
@@ -432,7 +436,7 @@ class NeuralMemory(nn.Module):
         surprises = jax.tree_util.tree_map(lambda t: -t, grads)
 
         # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам (нет)
-        surprises = jax.tree_util.tree_map(apply_fast_ns_to_tensor, surprises)
+        # surprises = jax.tree_util.tree_map(apply_fast_ns_to_tensor, surprises)
 
         # associative scan
         next_momentum = {}
@@ -528,7 +532,7 @@ class NeuralMemory(nn.Module):
             
         return values
 
-    def __call__(self, seq, memory_state=None, return_next_memories=False):
+    def __call__(self, seq, memory_state=None, return_next_memories=False, kv_seq=None):
         batch, seq_len = seq.shape[:2]
         
         if seq_len < self.chunk_size:
@@ -540,7 +544,7 @@ class NeuralMemory(nn.Module):
         if not exists(memory_state):
             memory_state = self.init_state(batch, dtype=seq.dtype)
 
-        updates, next_mem_state = self.store_memories(seq, memory_state)
+        updates, next_mem_state = self.store_memories(seq, memory_state, kv_seq=kv_seq)
         
         past_weights, _ = memory_state
         
