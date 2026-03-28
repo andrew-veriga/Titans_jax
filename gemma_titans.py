@@ -49,6 +49,7 @@ class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
     diff_view: bool = False
     
+    
     def setup(self):
         super().setup()
         

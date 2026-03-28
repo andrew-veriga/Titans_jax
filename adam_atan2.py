@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from optax._src import base
 from optax._src import combine
 from optax._src import transform
-
+ 
 def adam_atan2(
     learning_rate: base.ScalarOrSchedule,
     b1: jax.typing.ArrayLike = 0.9,

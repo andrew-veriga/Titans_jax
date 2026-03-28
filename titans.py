@@ -438,6 +438,7 @@ class NeuralMemory(nn.Module):
         # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам (нет)
         # surprises = jax.tree_util.tree_map(apply_fast_ns_to_tensor, surprises)
 
+
         # associative scan
         next_momentum = {}
         updates = {}
