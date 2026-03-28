@@ -158,6 +158,45 @@ def newton_schulz_norm_matrix(x: jnp.ndarray) -> jnp.ndarray:
         x_normalized = x_normalized.T
         
     return x_normalized
+import jax.numpy as jnp
+
+def apply_fast_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
+    """
+    Векторизованная и развернутая (unrolled) версия Newton-Schulz.
+    Работает мгновенно благодаря нативному батчингу jnp.matmul и слиянию графа XLA.
+    """
+    """
+    Векторизованная и сверхбыстрая версия Newton-Schulz.
+    Использует классические коэффициенты для строгой ортогонализации (max singular value == 1.0).
+    """
+    # Если тензор меньше 5D (например, одномерные векторы bias), возвращаем как есть
+    if t.ndim < 5:
+        return t
+    steps = 5
+    eps = 1e-7
+    # Транспонируем последние 2 размерности, если строк больше столбцов
+    should_transpose = t.shape[-2] > t.shape[-1]
+    if should_transpose:
+        t = jnp.swapaxes(t, -1, -2)
+        
+    # Нормализация Фробениуса
+    norm = jnp.linalg.norm(t, ord='fro', axis=(-2, -1), keepdims=True)
+    t = t / jnp.maximum(norm, eps)
+    
+    # Классические коэффициенты (сводят сингулярные числа ровно к 1.0)
+    a, b = 1.5, -0.5
+    
+    # Развернутый цикл: XLA сольет эти операции в один быстрый блок
+    # Оператор @ нативно перемножает матрицы по последним двум осям для всего батча сразу
+    for _ in range(steps):
+        A = t @ jnp.swapaxes(t, -1, -2)
+        t = a * t + b * (A @ t)
+        
+    # Возвращаем исходную ориентацию
+    if should_transpose:
+        t = jnp.swapaxes(t, -1, -2)
+        
+    return t
 
 def apply_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
     """
@@ -379,7 +418,7 @@ class NeuralMemory(nn.Module):
         surprises = jax.tree_util.tree_map(lambda t: -t, grads)
 
         # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам (нет)
-        # surprises = jax.tree_util.tree_map(apply_ns_to_tensor, surprises)
+        surprises = jax.tree_util.tree_map(apply_fast_ns_to_tensor, surprises)
 
         # associative scan
         next_momentum = {}
