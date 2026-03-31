@@ -17,3 +17,6 @@ saved_titans_delta/
 titans_workdir_squad/
 test_*.py
 Kauldron_Titans_TPU_v5e_fixed_crach.ipynb
+TITANS_ARCHITECTURE.md
+training.png
+.claude/settings.local.json

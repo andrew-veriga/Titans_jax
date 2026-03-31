@@ -65,7 +65,7 @@ class TitansBlock(_modules.Block):
         # 1152 независимых вентиля
         self.memory_gate = self.param(
             'memory_gate', 
-            flax_nn.initializers.constant(-2.0), 
+            flax_nn.initializers.constant(0.0), 
             (self.embed_dim,) # <-- Ключевое изменение: задаем размерность эмбеддинга
         )
         
