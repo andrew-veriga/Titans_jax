@@ -1,38 +1,21 @@
-import os
-os.environ['KAULDRON_TYPECHECK'] = '0'
-os.environ['KD_CHECK_TYPES'] = '0'
-
-import sys
-sys.path.insert(0, os.path.abspath('.'))
-
 import jax
-import jax.numpy as jnp
-from gemma import gm
-import importlib
+import orbax.checkpoint as ocp
+import os
 
-import gemma_titans
-importlib.reload(gemma_titans)
-from gemma_titans import Gemma3_1B_Titans
+# Загружаем сохранённые titans веса
+titans_delta_path = "./saved_titans_delta"
+if not os.path.exists(titans_delta_path):
+    import zipfile
+    with zipfile.ZipFile("saved_titans_delta.zip", "r") as z:
+        z.extractall(titans_delta_path)
 
-# Инициализация модели
-model = Gemma3_1B_Titans(
-    config=Gemma3_1B_Titans.config,
-    dtype=jnp.bfloat16,
-    return_last_only=False,
-    tokens="batch.tokens",
-)
-
-# Загрузка весов
-print("Загрузка весов Gemma3 1B IT...")
-params = gm.ckpts.load_params(gm.ckpts.CheckpointPath.GEMMA3_1B_IT)
+checkpointer = ocp.StandardCheckpointer()
+params = checkpointer.restore(os.path.abspath(titans_delta_path))
 
 # Вывод дерева параметров
 print("\n" + "="*80)
-print("ДЕРЕВО ПАРАМЕТРОВ")
+print("TITANS ПАРАМЕТРЫ (memory + memory_gate)")
 print("="*80)
-
-total_params = 0
-memory_params = 0
 
 paths_and_shapes = []
 jax.tree_util.tree_map_with_path(
@@ -42,22 +25,11 @@ jax.tree_util.tree_map_with_path(
     params
 )
 
+total = 0
 for path, shape, dtype, size in sorted(paths_and_shapes):
-    is_memory = 'memory' in path or 'titans' in path.lower()
-    marker = " <<<" if is_memory else ""
-    print(f"{path}: {shape} [{dtype}]{marker}")
-    total_params += size
-    if is_memory:
-        memory_params += size
+    print(f"{path}: {shape} [{dtype}]")
+    total += size
 
 print("="*80)
-print(f"Всего параметров:   {total_params:,}")
-print(f"Memory параметров:  {memory_params:,} ({100*memory_params/total_params:.2f}%)")
+print(f"Итого memory параметров: {total:,}")
 print("="*80)
-
-# Отдельно — только memory-параметры
-print("\nТОЛЬКО MEMORY ПАРАМЕТРЫ:")
-print("-"*80)
-for path, shape, dtype, size in sorted(paths_and_shapes):
-    if 'memory' in path or 'titans' in path.lower():
-        print(f"  {path}: {shape}")
