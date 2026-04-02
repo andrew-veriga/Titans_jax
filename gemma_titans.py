@@ -57,7 +57,7 @@ class TitansBlock(_modules.Block):
             dim=self.embed_dim,
             heads=self.num_heads,
             dim_head=256, # фиксированная размерность головы для памяти
-            chunk_size=32, # размерность чанка для обработки памяти (можно настроить)
+            chunk_size=64, # размерность чанка для обработки памяти (можно настроить)
             max_grad_norm=0.5, # для стабильности обучения
             diff_view=self.diff_view
         )
