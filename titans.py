@@ -283,10 +283,10 @@ class NeuralMemory(nn.Module):
         self.grad_fn = jax.grad(forward_and_loss)
 
         # attention pooling для получения весов внутри чанков для momentum и decay factor:
-        pool_hidden_dim = self.dim // 4
+        
         
         # Объявляем слои для attention pooling как атрибуты модуля
-        pool_hidden_dim = self.dim // 4
+        pool_hidden_dim = self.dim // self.heads
         self.chunk_pool_layer1 = nn.Dense(pool_hidden_dim, use_bias=False)
         self.chunk_pool_layer2 = nn.Dense(1, use_bias=False)
 
