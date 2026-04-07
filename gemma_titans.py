@@ -142,6 +142,12 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     is_training_mode: bool = True
     neural_mem_qkv_receives_diff_view: bool = True
     training_phase: int = 1  # 1: per-layer distillation, 2: LM fine-tuning
+    # Phase 2 only: stop_gradient is inserted before this layer to limit backward graph depth.
+    # Must be one of titans_layer_indices. Smaller value = deeper backward = more compile RAM.
+    # 23 → backward through 3 layers (~5GB compile RAM)
+    # 17 → backward through 9 layers (~25GB compile RAM)
+    # 11 → backward through 15 layers (~70GB compile RAM)
+    titans_phase2_first_layer: int = 23
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -364,13 +370,20 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             if isinstance(block, TitansBlock):
                 if is_training:
                   if self.config.training_phase == 2:
-                    # Phase 2: student outputs chain through layers, gradient flows freely
+                    # Phase 2: stop_gradient before the first active Titans block to cut the
+                    # backward graph. Layers before titans_phase2_first_layer get zero grads
+                    # (optimizer partial_updates masks them anyway), but XLA only needs to
+                    # compile backward for layers from titans_phase2_first_layer to the loss.
+                    # titans_layer_indices stays unchanged to preserve checkpoint compatibility.
+                    if i == self.config.titans_phase2_first_layer:
+                        x = jax.lax.stop_gradient(x)
+                        x_prev = jax.lax.stop_gradient(x_prev)
                     layer_cache_student, out_student = block(
                         x,
                         inputs.positions,
                         old_cache.get(layer_name),
                         s_mask,
-                        False,  # is_teacher_mode — positional, required for static_argnums=(4,)
+                        False,  # is_teacher_mode — positional, required for static_argnums=(5,)
                         x_prev if block.diff_view else None,  # kv_seq
                     )
                     x_prev = x
