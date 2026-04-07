@@ -25,6 +25,7 @@ import os
 os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
 import importlib
+import optax
 import titans
 importlib.reload(titans)
 
@@ -140,6 +141,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     titans_layer_indices: tuple[int, ...] = (5, 11, 17, 23)
     is_training_mode: bool = True
     neural_mem_qkv_receives_diff_view: bool = True
+    training_phase: int = 1  # 1: per-layer distillation, 2: LM fine-tuning
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -256,14 +258,31 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             )
 
         if is_training:
-            # РЕЖИМ ТРЕНИРОВКИ (Дистилляция)
-            # Отключаем декодер логитов для экономии памяти (сохраняем ~16GB HBM)
-            return DistillationOutput(
-                logits=jnp.zeros((x.shape[0], 1)), # Заглушка
-                cache=None if cache is None else new_cache,
-                hidden_states=x if return_hidden_states else None,
-                layer_losses=layer_losses
-            )
+            if self.config.training_phase == 2:
+                # Phase 2: LM fine-tuning — compute real logits and cross-entropy loss
+                logits = self.embedder.decode(x)
+                if self.config.final_logit_softcap is not None:
+                    logits /= self.config.final_logit_softcap
+                    logits = jnp.tanh(logits) * self.config.final_logit_softcap
+                lm_ce = optax.softmax_cross_entropy_with_integer_labels(
+                    logits[:, :-1, :].astype(jnp.float32),
+                    tokens[:, 1:],
+                )
+                layer_losses['lm_loss'] = jnp.mean(lm_ce)
+                return DistillationOutput(
+                    logits=logits,
+                    cache=None if cache is None else new_cache,
+                    hidden_states=x if return_hidden_states else None,
+                    layer_losses=layer_losses,
+                )
+            else:
+                # Phase 1: distillation — skip logit decoder to save HBM
+                return DistillationOutput(
+                    logits=jnp.zeros((x.shape[0], 1)),
+                    cache=None if cache is None else new_cache,
+                    hidden_states=x if return_hidden_states else None,
+                    layer_losses=layer_losses,
+                )
         else:
             # РЕЖИМ ИНФЕРЕНСА (Генерация текста)
             if return_last_only:
@@ -322,6 +341,21 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             
             if isinstance(block, TitansBlock):
                 if is_training:
+                  if self.config.training_phase == 2:
+                    # Phase 2: student outputs chain through layers, gradient flows freely
+                    layer_cache_student, out_student = block(
+                        x,
+                        inputs.positions,
+                        old_cache.get(layer_name),
+                        s_mask,
+                        is_teacher_mode=False,
+                        kv_seq=x_prev if block.diff_view else None
+                    )
+                    x_prev = x
+                    x = out_student
+                    new_cache[layer_name] = layer_cache_student
+                  else:
+                    # Phase 1: teacher/student passes, teacher chain
                     # 1. Teacher Pass (Full context)
                     layer_cache_teacher, out_teacher = block(
                         x,
@@ -331,7 +365,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         is_teacher_mode=True,
                         kv_seq=x_prev if block.diff_view else None
                     )
-                    
+
                     # 2. Student Pass (Truncated context, using the SAME input 'x')
                     layer_cache_student, out_student = block(
                         jax.lax.stop_gradient(x),
@@ -341,19 +375,13 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         is_teacher_mode=False,
                         kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None
                     )
-                    
+
                     # 3. Layer Loss
                     raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
-                    
-                    # if loss_mask is not None:
-                    #   safe_mask = loss_mask.reshape(x.shape[0], x.shape[1], 1)
-                    #   raw_diff = raw_diff * safe_mask
-                    
                     layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
-                    
                     layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
                     layer_losses[f"raw_mse_{layer_name}"] = layer_loss
-                    
+
                     # 4. Update x with Teacher's output to prevent Exposure Bias
                     x_prev = x
                     x = out_teacher
