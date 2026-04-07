@@ -278,6 +278,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 x_chunks = x_src.reshape(x_src.shape[0], -1, lm_chunk_size, x_src.shape[-1])
                 t_chunks = t_tgt.reshape(t_tgt.shape[0], -1, lm_chunk_size)
 
+                @jax.checkpoint  # recompute logits during backward instead of storing all chunks
                 def chunk_loss(_, chunk):
                     xc, tc = chunk
                     lc = self.embedder.decode(xc)
