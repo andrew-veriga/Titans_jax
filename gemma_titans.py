@@ -196,10 +196,16 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             )
             
             if i in self.config.titans_layer_indices:
-                blocks.append(TitansBlock(
-                    **block_kwargs,
-                    diff_view=self.config.neural_mem_qkv_receives_diff_view
-                ))
+                if self.config.training_phase == 2:
+                    blocks.append(flax_nn.remat(TitansBlock)(
+                        **block_kwargs,
+                        diff_view=self.config.neural_mem_qkv_receives_diff_view
+                    ))
+                else:
+                    blocks.append(TitansBlock(
+                        **block_kwargs,
+                        diff_view=self.config.neural_mem_qkv_receives_diff_view
+                    ))
             else:
                 if self.config.training_phase == 2:
                     blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
