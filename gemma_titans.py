@@ -197,9 +197,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             
             if i in self.config.titans_layer_indices:
                 if self.config.training_phase == 2:
-                    # static_argnums=(4,) marks is_teacher_mode as a compile-time constant
-                    # so remat can trace through the Python if-branch without TracerBoolConversionError
-                    blocks.append(flax_nn.remat(TitansBlock, static_argnums=(4,))(
+                    # static_argnums=(5,) marks is_teacher_mode as a compile-time constant.
+                    # flax remat's core_fn receives variables as args[0], so user args are offset by 1:
+                    # args[1]=x, args[2]=segment_pos, args[3]=cache, args[4]=attn_mask, args[5]=is_teacher_mode
+                    blocks.append(flax_nn.remat(TitansBlock, static_argnums=(5,))(
                         **block_kwargs,
                         diff_view=self.config.neural_mem_qkv_receives_diff_view
                     ))
