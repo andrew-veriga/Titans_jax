@@ -201,8 +201,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     diff_view=self.config.neural_mem_qkv_receives_diff_view
                 ))
             else:
-                # blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
-                blocks.append(_modules.Block(**block_kwargs))
+                if self.config.training_phase == 2:
+                    blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
+                else:
+                    blocks.append(_modules.Block(**block_kwargs))
         self.blocks = blocks
         self.final_norm = _layers.RMSNorm()
 
@@ -259,18 +261,43 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
 
         if is_training:
             if self.config.training_phase == 2:
-                # Phase 2: LM fine-tuning — compute real logits and cross-entropy loss
-                logits = self.embedder.decode(x)
-                if self.config.final_logit_softcap is not None:
-                    logits /= self.config.final_logit_softcap
-                    logits = jnp.tanh(logits) * self.config.final_logit_softcap
-                lm_ce = optax.softmax_cross_entropy_with_integer_labels(
-                    logits[:, :-1, :].astype(jnp.float32),
-                    tokens[:, 1:],
+                # Phase 2: LM fine-tuning — chunked cross-entropy to avoid materializing
+                # the full logit tensor [B, L, 262144] in HBM (~8GB at bf16).
+                # NOTE: lm_chunk_size is unrelated to NeuralMemory's chunk_size=64
+                # (which chunks the seq dimension for surprise computation inside Titans).
+                # Here we chunk the seq dimension of the LM head only:
+                # peak logit tensor = B × lm_chunk_size × vocab ≈ 256MB instead of 8GB.
+                lm_chunk_size = 256
+                x_src = x[:, :-1, :]   # (B, L-1, D)
+                t_tgt = tokens[:, 1:]  # (B, L-1)
+                seq_len = x_src.shape[1]
+                pad = (-seq_len) % lm_chunk_size
+                if pad > 0:
+                    x_src = jnp.pad(x_src, ((0,0),(0,pad),(0,0)))
+                    t_tgt = jnp.pad(t_tgt, ((0,0),(0,pad)))
+                x_chunks = x_src.reshape(x_src.shape[0], -1, lm_chunk_size, x_src.shape[-1])
+                t_chunks = t_tgt.reshape(t_tgt.shape[0], -1, lm_chunk_size)
+
+                def chunk_loss(_, chunk):
+                    xc, tc = chunk
+                    lc = self.embedder.decode(xc)
+                    if self.config.final_logit_softcap is not None:
+                        lc /= self.config.final_logit_softcap
+                        lc = jnp.tanh(lc) * self.config.final_logit_softcap
+                    return None, optax.softmax_cross_entropy_with_integer_labels(
+                        lc.astype(jnp.float32), tc
+                    )
+
+                # scan over num_chunks axis: (N, B, chunk, D) and (N, B, chunk)
+                _, ce_chunks = jax.lax.scan(
+                    chunk_loss, None,
+                    (x_chunks.transpose(1,0,2,3), t_chunks.transpose(1,0,2))
                 )
-                layer_losses['lm_loss'] = jnp.mean(lm_ce)
+                # ce_chunks: (N, B, chunk) → (B, L) trimmed to original seq_len
+                lm_ce = ce_chunks.transpose(1,0,2).reshape(x_src.shape[0], -1)[:, :seq_len]
+                layer_losses['lm_loss'] = jnp.mean(lm_ce, axis=-1)  # shape (batch,)
                 return DistillationOutput(
-                    logits=logits,
+                    logits=jnp.zeros((x.shape[0], 1)),  # логиты не нужны при обучении
                     cache=None if cache is None else new_cache,
                     hidden_states=x if return_hidden_states else None,
                     layer_losses=layer_losses,
