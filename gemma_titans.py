@@ -197,7 +197,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             
             if i in self.config.titans_layer_indices:
                 if self.config.training_phase == 2:
-                    blocks.append(flax_nn.remat(TitansBlock)(
+                    # static_argnums=(4,) marks is_teacher_mode as a compile-time constant
+                    # so remat can trace through the Python if-branch without TracerBoolConversionError
+                    blocks.append(flax_nn.remat(TitansBlock, static_argnums=(4,))(
                         **block_kwargs,
                         diff_view=self.config.neural_mem_qkv_receives_diff_view
                     ))
@@ -367,8 +369,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         inputs.positions,
                         old_cache.get(layer_name),
                         s_mask,
-                        is_teacher_mode=False,
-                        kv_seq=x_prev if block.diff_view else None
+                        False,  # is_teacher_mode — positional, required for static_argnums=(4,)
+                        x_prev if block.diff_view else None,  # kv_seq
                     )
                     x_prev = x
                     x = out_student
