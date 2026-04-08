@@ -384,12 +384,21 @@ class NeuralMemory(nn.Module):
             mlp_depth = 2
             if exists(self.default_mlp_kwargs):
                 mlp_depth = self.default_mlp_kwargs.get('depth', 2)
-            k, lr, v = xs 
+            k, lr, v = xs
             # lr сейчас имеет форму (batch*heads, chunk_size, depth)
-            
+
+            # Guard 1: clip keys/values before grad_fn to prevent gradient overflow
+            k = jnp.clip(k, -10.0, 10.0)
+            v = jnp.clip(v, -10.0, 10.0)
+
             # 1. Получаем сырые градиенты (PyTree словарей с 'weight_0', 'weight_1' и т.д.)
             # Заметь: grad_fn больше не принимает lr
             g = jax.vmap(self.grad_fn)(past_weights_bh, k, v)
+
+            # Guard 2: zero out any NaN/Inf gradients before applying them
+            g = jax.tree_util.tree_map(
+                lambda t: jnp.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0), g
+            )
             
             # 2. Модуляция: умножаем градиенты каждого слоя на его собственный lr.
             # Для этого усредняем lr внутри чанка по оси 1 (chunk_size), 

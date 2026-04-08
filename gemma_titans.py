@@ -110,7 +110,10 @@ class TitansBlock(_modules.Block):
                 kv_seq=kv_seq
             )
             # Combine Attention and Memory
-            combined_output = attn_output + jax.nn.sigmoid(self.memory_gate) * retrieved
+            # Guard 3: sanitize retrieved and clamp gate to prevent NaN propagation
+            retrieved = jnp.nan_to_num(retrieved, nan=0.0, posinf=0.0, neginf=0.0)
+            gate = jax.nn.sigmoid(jnp.clip(self.memory_gate, -10.0, 10.0))
+            combined_output = attn_output + gate * retrieved
 
         if self.post_attention_norm is not None:
             combined_output = self.post_attention_norm(combined_output)
