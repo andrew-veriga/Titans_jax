@@ -101,6 +101,15 @@ def default_adaptive_step_transform(adaptive_step, max_lr=1e-2):
 def default_loss_fn(pred, target):
     return jnp.mean((pred - target) ** 2, axis=-1)
 
+# Huber (delta подбирается, старт с 1.0):
+def huber_loss(pred, target, delta=1.0):
+    r = pred - target
+    return jnp.where(
+        jnp.abs(r) <= delta,
+        0.5 * r ** 2,
+        delta * (jnp.abs(r) - 0.5 * delta)
+    ).mean()
+
 def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[int] = None, mlp_depth: int = 2, *, dtype: Any):
     """Standalone function to initialize memory state without Module scope issues."""
     dim_head = default(dim_head, dim // heads if dim_head is None else dim_head)
@@ -232,6 +241,7 @@ class NeuralMemory(nn.Module):
     pre_rmsnorm: bool = True
     post_rmsnorm: bool = True
     max_grad_norm: Optional[float] = None
+    elastic_net_lambda: Optional[float] = None
     default_mlp_kwargs: dict = None
     diff_view: bool = False
 
@@ -411,10 +421,10 @@ class NeuralMemory(nn.Module):
 
             return carry, g
 
-        # scan_step_ckp = jax.checkpoint(scan_step)
+        scan_step_ckp = jax.checkpoint(scan_step)
 
         _, grads = jax.lax.scan(
-            scan_step,
+            scan_step_ckp,
             init=None,
             xs=(keys, adaptive_lr_chunked, values)
         )
@@ -455,7 +465,10 @@ class NeuralMemory(nn.Module):
             
             # update with decay
             _, update = associative_scan(binary_operator, (1.0 - decay_factor, momentum), axis=2)
-            
+            # Elastic Net soft thresholding:
+            if exists(self.elastic_net_lambda):
+                update = jnp.sign(update) * jnp.maximum(jnp.abs(update) - self.elastic_net_lambda, 0.0)
+
             updates[param_name] = update.reshape(orig_shape)
             next_momentum[param_name] = momentum.reshape(orig_shape)
 

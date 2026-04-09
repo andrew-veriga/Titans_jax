@@ -49,6 +49,7 @@ if not hasattr(_cache_helper._set_cache, '_is_titans_patched'):
 class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
     diff_view: bool = False
+    elastic_net_lambda: Optional[float] = None
     
     
     def setup(self):
@@ -56,10 +57,11 @@ class TitansBlock(_modules.Block):
         
         self.memory = NeuralMemory(
             dim=self.embed_dim,
-            heads=self.num_heads,
-            dim_head=256, # фиксированная размерность головы для памяти
-            chunk_size=64, # размерность чанка для обработки памяти (можно настроить)
-            max_grad_norm=0.5, # для стабильности обучения
+            heads=8,
+            dim_head=256,
+            chunk_size=64,
+            max_grad_norm=0.5,
+            elastic_net_lambda=self.elastic_net_lambda,
             diff_view=self.diff_view
         )
         
@@ -151,6 +153,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     # 17 → backward through 9 layers (~25GB compile RAM)
     # 11 → backward through 15 layers (~70GB compile RAM)
     titans_phase2_first_layer: int = 23
+    neural_mem_elastic_lambda: Optional[float] = None
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -211,12 +214,14 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     # args[1]=x, args[2]=segment_pos, args[3]=cache, args[4]=attn_mask, args[5]=is_teacher_mode
                     blocks.append(flax_nn.remat(TitansBlock, static_argnums=(5,))(
                         **block_kwargs,
-                        diff_view=self.config.neural_mem_qkv_receives_diff_view
+                        diff_view=self.config.neural_mem_qkv_receives_diff_view,
+                        elastic_net_lambda=self.config.neural_mem_elastic_lambda,
                     ))
                 else:
                     blocks.append(TitansBlock(
                         **block_kwargs,
-                        diff_view=self.config.neural_mem_qkv_receives_diff_view
+                        diff_view=self.config.neural_mem_qkv_receives_diff_view,
+                        elastic_net_lambda=self.config.neural_mem_elastic_lambda,
                     ))
             else:
                 if self.config.training_phase == 2:
