@@ -1,4 +1,5 @@
 venv*/
+.venv*/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
@@ -21,3 +22,7 @@ TITANS_ARCHITECTURE.md
 training.png
 .claude/settings.local.json
 Titan_params.txt
+/data
+colabs/logs
+colabs/dialog
+colabs/gemma

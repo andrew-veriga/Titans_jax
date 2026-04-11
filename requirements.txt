@@ -1,5 +1,4 @@
 # Minimal Requirements for Gemma-Titans Hybrid
-gemma==3.3.0
 flax==0.12.5
 optax==0.2.6
 typeguard==4.4.1
