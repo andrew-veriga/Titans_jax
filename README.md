@@ -40,7 +40,7 @@ Run the following in a Colab cell:
 ### 3. Clone and Run Verification
 ```bash
 # Clone the repository
-!git clone https://github.com/andrew-veriga/Titans_jax.git
+!git clone --depth 1 https://github.com/andrew-veriga/Titans_jax.git
 %cd Titans_jax
 
 # Run the hybrid model forward pass test
