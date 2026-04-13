@@ -26,3 +26,6 @@ Titan_params.txt
 colabs/logs
 colabs/dialog
 colabs/gemma
+colabs/train_gemma_generated.array_record
+colabs/gemma3_1b_it_params.pkl.orbax-checkpoint-tmp
+test.ar
