@@ -20,6 +20,7 @@ from gemma.gm.utils import _dtype_params
 from gemma.gm.vision import _token_utils
 from gemma.gm.utils import _cache_helper
 from kauldron.typing import Bool, Float, Int, UInt8
+from kauldron import kontext
 import os
 
 os.environ['KAULDRON_TYPECHECK'] = '0'
@@ -183,6 +184,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
            for f in dataclasses.fields(_config.TransformerConfig)}
 
     )
+    
+    tokens: kontext.Key = "batch.tokens"
+    step: kontext.Key = "step"
 
     def setup(self):
         self.embedder = _modules.Embedder(
