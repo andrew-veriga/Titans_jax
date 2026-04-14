@@ -6,7 +6,8 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 import flax.linen as nn
-# import optax
+import optax
+from optax._src import base
 from einops import rearrange, repeat, pack, unpack
 
 from associative_scan import associative_scan, binary_operator, pad_at_dim
@@ -98,17 +99,18 @@ def default_adaptive_step_transform(adaptive_step, max_lr=1e-2):
     return jax.nn.sigmoid(adaptive_step) * max_lr
 
 
-def default_loss_fn(pred, target):
+def default_loss_fn(pred, target, **kwargs):
     return jnp.mean((pred - target) ** 2, axis=-1)
 
-# Huber (delta подбирается, старт с 1.0):
-def huber_loss(pred, target, delta=1.0):
+# Huber (delta подбирается, старт с 0.1):
+def huber_loss(pred, target, delta=0.1, **kwargs):
     r = pred - target
-    return jnp.where(
+    loss = jnp.where(
         jnp.abs(r) <= delta,
         0.5 * r ** 2,
         delta * (jnp.abs(r) - 0.5 * delta)
-    ).mean()
+    )
+    return jnp.mean(loss, axis=-1)
 
 def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[int] = None, mlp_depth: int = 2, *, dtype: Any):
     """Standalone function to initialize memory state without Module scope issues."""
@@ -285,12 +287,12 @@ class NeuralMemory(nn.Module):
         self.empty_memory_embed = self.param('empty_memory_embed', nn.initializers.normal(stddev=0.02), (self.dim,))
 
         # prepare per sample grad fn
-        def forward_and_loss(params, inputs, target):
+        def forward_and_loss(params, inputs, target, **loss_kwargs):
             pred = self.memory_model.apply({'params': params}, inputs)
-            loss = self.store_memory_loss_fn(pred, target)
+            loss = self.store_memory_loss_fn(pred, target, **loss_kwargs)
             return loss.sum()
 
-        self.grad_fn = jax.grad(forward_and_loss)
+        self.grad_fn = forward_and_loss
 
         # attention pooling для получения весов внутри чанков для momentum и decay factor:
         
@@ -308,11 +310,12 @@ class NeuralMemory(nn.Module):
             
         return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth, dtype=dtype)
 
-    def store_memories(self, seq, past_state, kv_seq=None):
+    def store_memories(self, seq, past_state, kv_seq=None, loss_kwargs=None):
         """
         реализует механизм ассоциативной памяти, 
         где веса модели обновляются на лету на основе входной последовательности
         """
+        loss_kwargs = default(loss_kwargs, {})
         batch = seq.shape[0]
         seq = self.store_norm(seq)
         
@@ -361,8 +364,8 @@ class NeuralMemory(nn.Module):
         keys, values = jnp.split(kv, 2, axis=-1)
 
         # multi head
-        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.heads)
-        values = rearrange(values, 'b n (h d) -> b h n d', h=self.heads)
+        keys = rearrange(keys, 'b h n d', h=self.heads)
+        values = rearrange(values, 'b h n d', h=self.heads)
         
         # --- ВНЕДРЕНИЕ VALUE LOOKAHEAD ---
         # Сдвигаем значения на 1 токен в будущее вдоль оси seq_len (ось 2)
@@ -389,6 +392,8 @@ class NeuralMemory(nn.Module):
             past_weights
         )
         
+        # Create the gradient function from forward_and_loss
+        grad_fn = jax.grad(self.grad_fn)
 
         def scan_step(carry, xs):
             mlp_depth = 2
@@ -403,7 +408,7 @@ class NeuralMemory(nn.Module):
 
             # 1. Получаем сырые градиенты (PyTree словарей с 'weight_0', 'weight_1' и т.д.)
             # Заметь: grad_fn больше не принимает lr
-            g = jax.vmap(self.grad_fn)(past_weights_bh, k, v)
+            g = jax.vmap(partial(grad_fn, **loss_kwargs))(past_weights_bh, k, v)
 
             # Guard 2: zero out any NaN/Inf gradients before applying them
             g = jax.tree_util.tree_map(
@@ -545,7 +550,7 @@ class NeuralMemory(nn.Module):
             
         return values
 
-    def __call__(self, seq, memory_state=None, return_next_memories=False, kv_seq=None):
+    def __call__(self, seq, memory_state=None, return_next_memories=False, kv_seq=None, loss_kwargs=None):
         batch, seq_len = seq.shape[:2]
         
         if seq_len < self.chunk_size:
@@ -557,7 +562,7 @@ class NeuralMemory(nn.Module):
         if not exists(memory_state):
             memory_state = self.init_state(batch, dtype=seq.dtype)
 
-        updates, next_mem_state = self.store_memories(seq, memory_state, kv_seq=kv_seq)
+        updates, next_mem_state = self.store_memories(seq, memory_state, kv_seq=kv_seq, loss_kwargs=loss_kwargs)
         
         past_weights, _ = memory_state
         

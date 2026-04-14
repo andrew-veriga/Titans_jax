@@ -26,11 +26,12 @@ os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
 import importlib
 import optax
+from optax._src import base
 import titans
 importlib.reload(titans)
 
 # Import the existing Neural Memory from the project
-from titans import NeuralMemory, init_memory_state
+from titans import NeuralMemory, init_memory_state, huber_loss, default_loss_fn
 
 # Monkeypatch _set_cache to support memory_state merging during prefill
 # To safely handle Colab cell re-runs without recursion, check if the function is already patched.
@@ -50,11 +51,13 @@ class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
     diff_view: bool = False
     elastic_net_lambda: Optional[float] = None
+    huber_loss_delta: base.ScalarOrSchedule = None
     
     
     def setup(self):
         super().setup()
         
+        # Note: huber_loss_delta is now evaluated per-call if it's a schedule
         self.memory = NeuralMemory(
             dim=self.embed_dim,
             heads=8,
@@ -62,7 +65,8 @@ class TitansBlock(_modules.Block):
             chunk_size=64,
             max_grad_norm=0.5,
             elastic_net_lambda=self.elastic_net_lambda,
-            diff_view=self.diff_view
+            diff_view=self.diff_view,
+            store_memory_loss_fn=huber_loss if self.huber_loss_delta is not None else default_loss_fn
         )
         
         # 1152 независимых вентиля
@@ -80,6 +84,7 @@ class TitansBlock(_modules.Block):
         attn_mask: jax.Array,
         is_teacher_mode: bool = False,
         kv_seq: Optional[jax.Array] = None,
+        current_huber_delta: Optional[Union[float, jax.Array]] = None,
         **kwargs,
     ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
         
@@ -105,11 +110,17 @@ class TitansBlock(_modules.Block):
         else:
             # 2. Neural Memory (Titans) Branch (Student mode)
             # If diff_view is enabled, kv_seq contains the output of previous layer
+            
+            loss_kwargs = {}
+            if current_huber_delta is not None:
+                loss_kwargs['delta'] = current_huber_delta
+
             retrieved, next_mem_state = self.memory(
                 inputs_normalized,
                 memory_state=mem_state,
                 return_next_memories=True,
-                kv_seq=kv_seq
+                kv_seq=kv_seq,
+                loss_kwargs=loss_kwargs
             )
             # Combine Attention and Memory
             # Guard 3: sanitize retrieved and clamp gate to prevent NaN propagation
@@ -154,6 +165,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     # 11 → backward through 15 layers (~70GB compile RAM)
     titans_phase2_first_layer: int = 23
     neural_mem_elastic_lambda: Optional[float] = None
+    neural_mem_huber_delta: base.ScalarOrSchedule = None
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -216,12 +228,14 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         **block_kwargs,
                         diff_view=self.config.neural_mem_qkv_receives_diff_view,
                         elastic_net_lambda=self.config.neural_mem_elastic_lambda,
+                        huber_loss_delta=self.config.neural_mem_huber_delta,
                     ))
                 else:
                     blocks.append(TitansBlock(
                         **block_kwargs,
                         diff_view=self.config.neural_mem_qkv_receives_diff_view,
                         elastic_net_lambda=self.config.neural_mem_elastic_lambda,
+                        huber_loss_delta=self.config.neural_mem_huber_delta,
                     ))
             else:
                 if self.config.training_phase == 2:
@@ -259,6 +273,15 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         # MАРКЕР РЕЖИМА: Если есть loss_mask, значит мы в цикле тренировки Kauldron
         is_training = self.config.is_training_mode
 
+        # Evaluate huber delta if it's a schedule
+        current_huber_delta = None
+        if self.config.neural_mem_huber_delta is not None:
+            if callable(self.config.neural_mem_huber_delta):
+                step = kwargs.get('step', 0)
+                current_huber_delta = self.config.neural_mem_huber_delta(step)
+            else:
+                current_huber_delta = self.config.neural_mem_huber_delta
+
         with _dtype_params.initialize_param_with_dtype(
             self.dtype,
             exclude=[
@@ -279,7 +302,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             x, new_cache, layer_losses = self._apply_attention(
                 inputs, 
                 cache, 
-                is_training=is_training
+                is_training=is_training,
+                current_huber_delta=current_huber_delta
             )
 
         if is_training:
@@ -350,6 +374,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         cache: Optional[Dict[str, Any]],
         # loss_mask: jax.Array | None,
         is_training: bool,
+        current_huber_delta: Optional[float] = None,
     ) -> tuple[jax.Array, Dict[str, Any], Dict[str, jax.Array]]:
         x = inputs.embeddings
         # Track previous layer output for hyper-connections (diff view)
@@ -393,6 +418,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         s_mask,
                         False,  # is_teacher_mode — positional, required for static_argnums=(5,)
                         x_prev if block.diff_view else None,  # kv_seq
+                        current_huber_delta=current_huber_delta
                     )
                     x_prev = x
                     x = out_student
@@ -406,7 +432,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         old_cache.get(layer_name),
                         inputs.attention_mask, # teacher mask
                         is_teacher_mode=True,
-                        kv_seq=x_prev if block.diff_view else None
+                        kv_seq=x_prev if block.diff_view else None,
+                        current_huber_delta=current_huber_delta
                     )
 
                     # 2. Student Pass (Truncated context, using the SAME input 'x')
@@ -416,7 +443,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         old_cache.get(layer_name),
                         s_mask, # student mask
                         is_teacher_mode=False,
-                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None
+                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None,
+                        current_huber_delta=current_huber_delta
                     )
 
                     # 3. Layer Loss
@@ -437,7 +465,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         old_cache.get(layer_name),
                         s_mask, # student mask
                         is_teacher_mode=False,
-                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None
+                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None,
+                        current_huber_delta=current_huber_delta
                     )
                     x_prev = x
                     x = out_student
