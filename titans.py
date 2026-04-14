@@ -364,8 +364,8 @@ class NeuralMemory(nn.Module):
         keys, values = jnp.split(kv, 2, axis=-1)
 
         # multi head
-        keys = rearrange(keys, 'b h n d', h=self.heads)
-        values = rearrange(values, 'b h n d', h=self.heads)
+        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.heads)
+        values = rearrange(values, 'b n (h d) -> b h n d', h=self.heads)
         
         # --- ВНЕДРЕНИЕ VALUE LOOKAHEAD ---
         # Сдвигаем значения на 1 токен в будущее вдоль оси seq_len (ось 2)
