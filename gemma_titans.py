@@ -186,9 +186,17 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     )
     
     tokens: kontext.Key = "batch.tokens"
-    step: kontext.Key = "step"
 
     def setup(self):
+        # Внутренний счетчик шагов для работы с расписаниями (Schedules)
+        # Мы используем коллекцию 'batch_stats', так как это стандарт Flax для 
+        # необучаемых состояний, которые обновляются во время forward pass.
+        self.step_counter = self.variable(
+            'batch_stats', 
+            'step_counter', 
+            lambda: jnp.array(0, dtype=jnp.int32)
+        )
+
         self.embedder = _modules.Embedder(
             vocab_size=self.config.num_embed,
             embed_dim=self.config.embed_dim,
@@ -277,12 +285,18 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         # MАРКЕР РЕЖИМА: Если есть loss_mask, значит мы в цикле тренировки Kauldron
         is_training = self.config.is_training_mode
 
+        # Получаем текущий шаг из внутреннего счетчика
+        step = self.step_counter.value
+        if self.is_mutable_collection('batch_stats'):
+            self.step_counter.value = step + 1
+
         # Evaluate huber delta if it's a schedule
         current_huber_delta = None
         if self.config.neural_mem_huber_delta is not None:
             if callable(self.config.neural_mem_huber_delta):
-                step = kwargs.get('step', 0)
-                current_huber_delta = self.config.neural_mem_huber_delta(step)
+                # Используем переданный шаг или внутренний счетчик
+                step_val = kwargs.get('step', step)
+                current_huber_delta = self.config.neural_mem_huber_delta(step_val)
             else:
                 current_huber_delta = self.config.neural_mem_huber_delta
 
