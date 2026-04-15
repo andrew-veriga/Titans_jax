@@ -269,6 +269,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
         return_hidden_states: bool | None = None,
+        **kwargs,
     ) -> Union[DistillationOutput, _transformer.Output]:
         """Forward pass. Broadcasts scalar step to batch dims, then delegates to _forward."""
         # step comes from kontext as scalar (); broadcast to (*B,) so that
@@ -285,6 +286,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             cache=cache,
             attention_mask=attention_mask,
             return_hidden_states=return_hidden_states,
+            **kwargs,
         )
 
     @_jax_utils.flatten_unflatten_batch_dim()
@@ -298,6 +300,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
         return_hidden_states: bool | None = None,
+        **kwargs,
     ) -> Union[DistillationOutput, _transformer.Output]:
         """Batched forward pass (called by __call__ after step broadcasting)."""
         return_last_only = self.return_last_only
