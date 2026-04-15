@@ -186,16 +186,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     )
     
     tokens: kontext.Key = "batch.tokens"
+    step: kontext.Key = "step"
 
     def setup(self):
-        # Внутренний счетчик шагов для работы с расписаниями (Schedules)
-        # Мы используем коллекцию 'batch_stats', так как это стандарт Flax для 
-        # необучаемых состояний, которые обновляются во время forward pass.
-        self.step_counter = self.variable(
-            'batch_stats', 
-            'step_counter', 
-            lambda: jnp.array(0, dtype=jnp.int32)
-        )
 
         self.embedder = _modules.Embedder(
             vocab_size=self.config.num_embed,
@@ -271,32 +264,25 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         self,
         tokens: Int['*B L'],
         *,
+        step: int = 0,
         images: UInt8['*B N H W C'] | UInt8['*B H W C'] | None = None,
         positions: Int['*B L_with_mm'] | None = None,
         cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
         # loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА ДЛЯ ОБУЧЕНИЯ
         return_hidden_states: bool | None = None,
-        **kwargs,
     ) -> Union[DistillationOutput, _transformer.Output]:
         """Forward pass - automatically switches between Meta-Training and Inference."""
         return_last_only = self.return_last_only
-        
+
         # MАРКЕР РЕЖИМА: Если есть loss_mask, значит мы в цикле тренировки Kauldron
         is_training = self.config.is_training_mode
-
-        # Получаем текущий шаг из внутреннего счетчика
-        step = self.step_counter.value
-        if self.is_mutable_collection('batch_stats'):
-            self.step_counter.value = step + 1
 
         # Evaluate huber delta if it's a schedule
         current_huber_delta = None
         if self.config.neural_mem_huber_delta is not None:
             if callable(self.config.neural_mem_huber_delta):
-                # Используем переданный шаг или внутренний счетчик
-                step_val = kwargs.get('step', step)
-                current_huber_delta = self.config.neural_mem_huber_delta(step_val)
+                current_huber_delta = self.config.neural_mem_huber_delta(step)
             else:
                 current_huber_delta = self.config.neural_mem_huber_delta
 
