@@ -64,7 +64,7 @@ class TitansBlock(_modules.Block):
             dim=self.embed_dim,
             heads=self.neural_mem_heads,
             dim_head=256,
-            chunk_size=64,
+            chunk_size=32,
             max_grad_norm=0.5,
             elastic_net_lambda=self.elastic_net_lambda,
             diff_view=self.diff_view,
