@@ -259,7 +259,6 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             'return_hidden_states',
         ),
     )
-    @_jax_utils.flatten_unflatten_batch_dim()
     def __call__(
         self,
         tokens: Int['*B L'],
@@ -269,20 +268,52 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         positions: Int['*B L_with_mm'] | None = None,
         cache: Optional[Dict[str, Any]] = None,
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
-        # loss_mask: jax.Array | None = None, # <--- ПРИНИМАЕМ МАСКУ ИЗ БАТЧА ДЛЯ ОБУЧЕНИЯ
         return_hidden_states: bool | None = None,
     ) -> Union[DistillationOutput, _transformer.Output]:
-        """Forward pass - automatically switches between Meta-Training and Inference."""
+        """Forward pass. Broadcasts scalar step to batch dims, then delegates to _forward."""
+        # step comes from kontext as scalar (); broadcast to (*B,) so that
+        # flatten_unflatten_batch_dim inside _forward sees a properly-shaped array.
+        step_b = jnp.broadcast_to(
+            jnp.asarray(step, dtype=jnp.int32),
+            tokens.shape[:-1],  # (*B,)
+        )
+        return self._forward(
+            tokens,
+            step=step_b,
+            images=images,
+            positions=positions,
+            cache=cache,
+            attention_mask=attention_mask,
+            return_hidden_states=return_hidden_states,
+        )
+
+    @_jax_utils.flatten_unflatten_batch_dim()
+    def _forward(
+        self,
+        tokens: Int['*B L'],
+        *,
+        step: Int['*B'],
+        images: UInt8['*B N H W C'] | UInt8['*B H W C'] | None = None,
+        positions: Int['*B L_with_mm'] | None = None,
+        cache: Optional[Dict[str, Any]] = None,
+        attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
+        return_hidden_states: bool | None = None,
+    ) -> Union[DistillationOutput, _transformer.Output]:
+        """Batched forward pass (called by __call__ after step broadcasting)."""
         return_last_only = self.return_last_only
 
         # MАРКЕР РЕЖИМА: Если есть loss_mask, значит мы в цикле тренировки Kauldron
         is_training = self.config.is_training_mode
 
+        # step has been broadcast to (*B,) and then flattened to (B_flat,) by the
+        # decorator; all elements are identical — take [0] to get the scalar step.
+        step_scalar = step[0]
+
         # Evaluate huber delta if it's a schedule
         current_huber_delta = None
         if self.config.neural_mem_huber_delta is not None:
             if callable(self.config.neural_mem_huber_delta):
-                current_huber_delta = self.config.neural_mem_huber_delta(step)
+                current_huber_delta = self.config.neural_mem_huber_delta(step_scalar)
             else:
                 current_huber_delta = self.config.neural_mem_huber_delta
 
