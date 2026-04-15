@@ -53,15 +53,16 @@ class TitansBlock(_modules.Block):
     diff_view: bool = False
     elastic_net_lambda: Optional[float] = None
     huber_loss_delta: base.ScalarOrSchedule = None
-    
-    
+    neural_mem_heads: int = 8
+
+
     def setup(self):
         super().setup()
-        
+
         # Note: huber_loss_delta is now evaluated per-call if it's a schedule
         self.memory = NeuralMemory(
             dim=self.embed_dim,
-            heads=8,
+            heads=self.neural_mem_heads,
             dim_head=256,
             chunk_size=64,
             max_grad_norm=0.5,
@@ -167,6 +168,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     titans_phase2_first_layer: int = 23
     neural_mem_elastic_lambda: Optional[float] = None
     neural_mem_huber_delta: base.ScalarOrSchedule = None
+    neural_mem_heads: int = 8  # Must match TitansBlock NeuralMemory(heads=...)
 
 @flax.struct.dataclass
 class DistillationOutput:
@@ -234,6 +236,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         diff_view=self.config.neural_mem_qkv_receives_diff_view,
                         elastic_net_lambda=self.config.neural_mem_elastic_lambda,
                         huber_loss_delta=self.config.neural_mem_huber_delta,
+                        neural_mem_heads=self.config.neural_mem_heads,
                     ))
                 else:
                     blocks.append(TitansBlock(
@@ -241,6 +244,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         diff_view=self.config.neural_mem_qkv_receives_diff_view,
                         elastic_net_lambda=self.config.neural_mem_elastic_lambda,
                         huber_loss_delta=self.config.neural_mem_huber_delta,
+                        neural_mem_heads=self.config.neural_mem_heads,
                     ))
             else:
                 if self.config.training_phase == 2:
@@ -550,7 +554,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 mem_state = init_memory_state(
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
-                    heads=self.config.num_heads,
+                    heads=self.config.neural_mem_heads,
                     dim_head=256,
                     dtype=dtype
                 )
