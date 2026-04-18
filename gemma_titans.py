@@ -366,14 +366,24 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     if self.config.final_logit_softcap is not None:
                         lc /= self.config.final_logit_softcap
                         lc = jnp.tanh(lc) * self.config.final_logit_softcap
-                    return jnp.mean(
+                    
+                    loss = jnp.mean(
                         optax.softmax_cross_entropy_with_integer_labels(
                             lc.astype(jnp.float32), tgt
                         ),
                         axis=-1,
                     )  # shape (batch,)
+                    
+                    # НОВОЕ: Вычисляем Accuracy внутри чекпоинта, пока логиты в памяти
+                    predicted_tokens = jnp.argmax(lc, axis=-1)
+                    accuracy = jnp.mean(predicted_tokens == tgt, axis=-1)
+                    
+                    return loss, accuracy
 
-                layer_losses['lm_loss'] = _lm_loss(x[:, :-1, :], tokens[:, 1:])
+                lm_loss, lm_acc = _lm_loss(x[:, :-1, :], tokens[:, 1:])
+                layer_losses['lm_loss'] = lm_loss
+                layer_losses['lm_accuracy'] = lm_acc
+                
                 return DistillationOutput(
                     logits=jnp.zeros((x.shape[0], 1)),  # логиты не нужны при обучении
                     cache=None if cache is None else new_cache,
