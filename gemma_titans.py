@@ -441,12 +441,19 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         
         # Build student mask (truncated window)
         if inputs.attention_mask is not None:
-            seq_len = x.shape[-2]
+            # Узнаем полную длину накопленного контекста (из маски или кэша)
+            k_len = inputs.attention_mask.shape[-1]
             window = 128  # Truncated context for Student
             
-            row_idx = jnp.arange(seq_len)[:, None]
-            col_idx = jnp.arange(seq_len)[None, :]
-            sliding_window = (row_idx - col_idx) < window
+            # Используем ИСТИННЫЕ позиции токенов (работает и для префилла L>1, и для декода L=1)
+            # inputs.positions имеет форму (batch, seq_len)
+            q_pos = inputs.positions[:, None, :, None] # [B, 1, L, 1]
+            
+            # Позиции в кэше (0...k_len-1)
+            k_pos = jnp.arange(k_len, dtype=jnp.int32)[None, None, None, :] # [1, 1, 1, K_len]
+            
+            # Окно смотрит только назад на 'window' токенов
+            sliding_window = (q_pos - k_pos) < window
             
             s_mask = inputs.attention_mask & sliding_window
         else:
