@@ -447,10 +447,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             
             # Используем ИСТИННЫЕ позиции токенов (работает и для префилла L>1, и для декода L=1)
             # inputs.positions имеет форму (batch, seq_len)
-            q_pos = inputs.positions[:, None, :, None] # [B, 1, L, 1]
             
-            # Позиции в кэше (0...k_len-1)
-            k_pos = jnp.arange(k_len, dtype=jnp.int32)[None, None, None, :] # [1, 1, 1, K_len]
+            # inputs.attention_mask имеет форму (B, L, K_len)
+            q_pos = inputs.positions[:, :, None] # [B, L, 1]
+            k_pos = jnp.arange(k_len, dtype=jnp.int32)[None, None, :] # [1, 1, K_len]
             
             # Окно смотрит только назад на 'window' токенов
             sliding_window = (q_pos - k_pos) < window
