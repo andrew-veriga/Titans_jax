@@ -47,8 +47,15 @@ def split_titans_params(params: _ParamsDict) -> SplittedParams:
 
   return SplittedParams(original_tree, titans_tree)
 
-def merge_titans_params(original: _ParamsDict, titans: _ParamsDict) -> _ParamsDict:
-  """Inverse of `split_titans_params`."""
+def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_attn: bool = False) -> _ParamsDict:
+  """Inverse of `split_titans_params`.
+  
+  Args:
+      remove_dead_attn: Если True, удаляет оригинальные веса 'attn' из слоев,
+                        где присутствует 'memory' или 'memory_gate'. Это экономит
+                        память в архитектуре "Чистый Вариант Б", где оригинальное 
+                        внимание Gemma не используется в слоях Titans.
+  """
 
   def _merge_recursive(original_subtree, titans_subtree):
     new_tree = {}
@@ -65,4 +72,12 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict) -> _ParamsDi
 
     return new_tree
 
-  return _merge_recursive(original, titans)
+  merged = _merge_recursive(original, titans)
+  
+  if remove_dead_attn:
+    for layer_name, layer_params in merged.items():
+      if isinstance(layer_params, dict) and ('memory' in layer_params or 'memory_gate' in layer_params):
+        if 'attn' in layer_params:
+          del layer_params['attn']
+          
+  return merged
