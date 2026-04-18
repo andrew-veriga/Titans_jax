@@ -99,21 +99,19 @@ class TitansBlock(_modules.Block):
 
         inputs_normalized = self.pre_attention_norm(x)
 
-        # 1. Standard Attention Branch
-        new_attn_cache, attn_output = self.attn(
-            inputs_normalized,
-            segment_pos,
-            cache,
-            attn_mask,
-        )
-
         if is_teacher_mode:
-            # Teacher mode: Full attention, no memory, residual
+            # 1. Teacher mode (Phase 1 target): Full attention Gemma, no memory
+            new_attn_cache, attn_output = self.attn(
+                inputs_normalized,
+                segment_pos,
+                cache,
+                attn_mask,
+            )
             combined_output = attn_output
             next_mem_state = mem_state # Memory state doesn't change in teacher mode
         else:
-            # 2. Neural Memory (Titans) Branch (Student mode)
-            # If diff_view is enabled, kv_seq contains the output of previous layer
+            # 2. Student mode (Phase 1) / Phase 2 / Inference:
+            # Pure Titans memory, NO original Gemma attention
             
             loss_kwargs = {}
             if current_huber_delta is not None:
@@ -126,11 +124,18 @@ class TitansBlock(_modules.Block):
                 kv_seq=kv_seq,
                 loss_kwargs=loss_kwargs
             )
-            # Combine Attention and Memory
             # Guard 3: sanitize retrieved and clamp gate to prevent NaN propagation
             retrieved = jnp.nan_to_num(retrieved, nan=0.0, posinf=0.0, neginf=0.0)
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate, -10.0, 10.0))
-            combined_output = attn_output + gate * retrieved
+            
+            # ЧИСТАЯ ЗАМЕНА: Оригинальный attn_output больше не прибавляется!
+            combined_output = gate * retrieved
+            
+            # Пробрасываем старый кэш Attention без изменений, чтобы сохранить структуру PyTree
+            new_attn_cache = dict(cache) if cache is not None else {}
+            # Удаляем memory_state из копии attn_cache, так как мы добавим его ниже
+            if 'memory_state' in new_attn_cache:
+                del new_attn_cache['memory_state']
 
         if self.post_attention_norm is not None:
             combined_output = self.post_attention_norm(combined_output)
