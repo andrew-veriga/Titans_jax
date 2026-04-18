@@ -246,6 +246,7 @@ class NeuralMemory(nn.Module):
     elastic_net_lambda: Optional[float] = None
     default_mlp_kwargs: dict = None
     diff_view: bool = False
+    is_look_ahead: bool = False
 
     def setup(self):
         dim_head = default(self.dim_head, self.dim // self.heads if self.dim_head is None else self.dim_head)
@@ -367,17 +368,20 @@ class NeuralMemory(nn.Module):
         keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.heads)
         values = rearrange(values, 'b n (h d) -> b h n d', h=self.heads)
         
-        # --- ВНЕДРЕНИЕ VALUE LOOKAHEAD ---
-        # Сдвигаем значения на 1 токен в будущее вдоль оси seq_len (ось 2)
-        values_next = values[:, :, 1:, :]
-        # Паддим последний токен нулями (или можно задублировать последний)
-        zeros_pad = jnp.zeros_like(values[:, :, -1:, :])
-        values_lookahead = jnp.concatenate([values_next, zeros_pad], axis=2)
-        
-        # Крайне важно: stop_gradient! Мы хотим обновить только память, 
-        # а не менять способ генерации эталонного value базовой моделью.
-        values = jax.lax.stop_gradient(values_lookahead)
-        # ---------------------------------
+        if self.is_look_ahead:
+            # --- ВНЕДРЕНИЕ VALUE LOOKAHEAD ---
+            # Сдвигаем значения на 1 токен в будущее вдоль оси seq_len (ось 2)
+            values_next = values[:, :, 1:, :]
+            # Паддим последний токен нулями (или можно задублировать последний)
+            zeros_pad = jnp.zeros_like(values[:, :, -1:, :])
+            values_lookahead = jnp.concatenate([values_next, zeros_pad], axis=2)
+            
+            # Крайне важно: stop_gradient! Мы хотим обновить только память, 
+            # а не менять способ генерации эталонного value базовой моделью.
+            values = jax.lax.stop_gradient(values_lookahead)
+            # ---------------------------------
+        else:
+            values = jax.lax.stop_gradient(values)
 
         num_chunks = round_down_seq_len // self.chunk_size
 

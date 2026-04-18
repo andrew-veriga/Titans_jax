@@ -54,6 +54,7 @@ class TitansBlock(_modules.Block):
     elastic_net_lambda: Optional[float] = None
     huber_loss_delta: base.ScalarOrSchedule = None
     neural_mem_heads: int = 8
+    is_look_ahead: bool = False
 
 
     def setup(self):
@@ -68,6 +69,7 @@ class TitansBlock(_modules.Block):
             max_grad_norm=0.5,
             elastic_net_lambda=self.elastic_net_lambda,
             diff_view=self.diff_view,
+            is_look_ahead=self.is_look_ahead,
             store_memory_loss_fn=huber_loss if self.huber_loss_delta is not None else default_loss_fn
         )
         
@@ -169,6 +171,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     neural_mem_elastic_lambda: Optional[float] = None
     neural_mem_huber_delta: base.ScalarOrSchedule = None
     neural_mem_heads: int = 8  # Must match TitansBlock NeuralMemory(heads=...)
+    is_look_ahead: bool = False
 
 @flax.struct.dataclass
 class DistillationOutput:
