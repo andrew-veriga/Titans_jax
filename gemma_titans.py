@@ -126,9 +126,8 @@ class TitansBlock(_modules.Block):
                 kv_seq=kv_seq,
                 loss_kwargs=loss_kwargs
             )
-            # Guard 3: sanitize retrieved and clamp gate to prevent NaN propagation
-            retrieved = jnp.nan_to_num(retrieved, nan=0.0, posinf=0.0, neginf=0.0)
-            gate = jax.nn.sigmoid(jnp.clip(self.memory_gate, -10.0, 10.0))
+            # Динамический вентиль: вычисляется на основе входного вектора
+            gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
             
             # ЧИСТАЯ ЗАМЕНА: Оригинальный attn_output больше не прибавляется!
             combined_output = gate * retrieved
