@@ -37,13 +37,13 @@ def split_titans_params(params: _ParamsDict) -> SplittedParams:
   def _split_recursive(input_subtree, original_subtree, titans_subtree):
     for key, value in input_subtree.items():
       if isinstance(value, dict):
-        if key in ('memory', 'memory_gate_proj', 'memory_gate'):
+        if key in ('memory', 'memory_gate_proj'):
           titans_subtree[key] = value
         else:
           original_subtree[key] = {}
           titans_subtree[key] = {}
           _split_recursive(value, original_subtree[key], titans_subtree[key])
-      elif key in ('memory', 'memory_gate_proj', 'memory_gate'):
+      elif key in ('memory', 'memory_gate_proj'):
         titans_subtree[key] = value
       else:
         original_subtree[key] = value
@@ -83,13 +83,19 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
     new_tree = {}
 
     for key, value in original_subtree.items():
+      # Пропускаем старый ключ даже если он есть в базе
+      if key == 'memory_gate':
+          continue
+          
       if isinstance(value, dict) and key in titans_subtree:
         new_tree[key] = _merge_recursive(value, titans_subtree[key])
       else:
         new_tree[key] = value
 
-    # Add the branches not present in the original tree
+    # Добавляем только новые ключи, ИГНОРИРУЯ старый memory_gate
     for k in sorted(set(titans_subtree) - set(original_subtree)):
+      if k == 'memory_gate':
+          continue
       new_tree[k] = titans_subtree[k]
 
     return new_tree
@@ -98,7 +104,7 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
   
   if remove_dead_attn:
     for layer_name, layer_params in merged.items():
-      if isinstance(layer_params, dict) and ('memory' in layer_params or 'memory_gate_proj' in layer_params or 'memory_gate' in layer_params):
+      if isinstance(layer_params, dict) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
         if 'attn' in layer_params:
           del layer_params['attn']
           
