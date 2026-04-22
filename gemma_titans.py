@@ -555,9 +555,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     total_distill += jnp.mean(v)
                     count += 1
             if count > 0:
-                layer_losses['lm_loss'] = total_distill / count
+                # Транслируем скалярный лосс на размер батча, чтобы декоратор мог его развернуть
+                layer_losses['lm_loss'] = jnp.broadcast_to(total_distill / count, (x.shape[0],))
             else:
-                layer_losses['lm_loss'] = jnp.zeros((), dtype=jnp.float32)
+                layer_losses['lm_loss'] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
 
         return x, new_cache, layer_losses
 
