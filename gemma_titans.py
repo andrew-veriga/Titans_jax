@@ -505,10 +505,13 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     
                     # 5. MERGE CACHE: Use Teacher's KV cache (for next layers) 
                     # but Student's updated memory_state (to keep learning)
-                    merged_cache = dict(layer_cache_teacher)
-                    if 'memory_state' in layer_cache_student:
-                        merged_cache['memory_state'] = layer_cache_student['memory_state']
-                    new_cache[layer_name] = merged_cache
+                    if layer_cache_teacher is not None:
+                        merged_cache = dict(layer_cache_teacher)
+                        if layer_cache_student is not None and 'memory_state' in layer_cache_student:
+                            merged_cache['memory_state'] = layer_cache_student['memory_state']
+                        new_cache[layer_name] = merged_cache
+                    else:
+                        new_cache[layer_name] = None
 
                 else:
                     # PHASE 2 / INFERENCE / EVAL: Pure Titans Memory (Student mode)
