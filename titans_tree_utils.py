@@ -7,21 +7,43 @@ class SplittedParams(NamedTuple):
   original: _ParamsDict
   titans: _ParamsDict
 
+def migrate_static_gate_to_dynamic(params: _ParamsDict) -> _ParamsDict:
+  """
+  Removes the old static 'memory_gate' vector from the checkpoint parameters.
+  This allows loading older Phase 1/2 checkpoints into the new architecture
+  that uses a dynamic 'memory_gate_proj' Dense layer. The new layer will be
+  initialized with random weights and requires a short re-training phase.
+  """
+  new_params = {}
+  for key, value in params.items():
+    if isinstance(value, dict):
+      if key == 'memory_gate':
+        print("Migrating checkpoint: Found and removed old static 'memory_gate'.")
+        continue  # Skip adding this key
+      else:
+        new_params[key] = migrate_static_gate_to_dynamic(value)
+    else:
+      if key == 'memory_gate':
+        print("Migrating checkpoint: Found and removed old static 'memory_gate'.")
+        continue
+      new_params[key] = value
+  return new_params
+
 def split_titans_params(params: _ParamsDict) -> SplittedParams:
-  """Split a nested tree into 2 trees, one with and without 'memory' and 'memory_gate' branches."""
+  """Split a nested tree into 2 trees, one with and without 'memory' and 'memory_gate_proj' branches."""
   original_tree = {}
   titans_tree = {}
 
   def _split_recursive(input_subtree, original_subtree, titans_subtree):
     for key, value in input_subtree.items():
       if isinstance(value, dict):
-        if key in ('memory', 'memory_gate'):
+        if key in ('memory', 'memory_gate_proj', 'memory_gate'):
           titans_subtree[key] = value
         else:
           original_subtree[key] = {}
           titans_subtree[key] = {}
           _split_recursive(value, original_subtree[key], titans_subtree[key])
-      elif key in ('memory', 'memory_gate'):
+      elif key in ('memory', 'memory_gate_proj', 'memory_gate'):
         titans_subtree[key] = value
       else:
         original_subtree[key] = value
@@ -52,7 +74,7 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
   
   Args:
       remove_dead_attn: Если True, удаляет оригинальные веса 'attn' из слоев,
-                        где присутствует 'memory' или 'memory_gate'. Это экономит
+                        где присутствует 'memory' или 'memory_gate_proj'. Это экономит
                         память в архитектуре "Чистый Вариант Б", где оригинальное 
                         внимание Gemma не используется в слоях Titans.
   """
@@ -76,7 +98,7 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
   
   if remove_dead_attn:
     for layer_name, layer_params in merged.items():
-      if isinstance(layer_params, dict) and ('memory' in layer_params or 'memory_gate' in layer_params):
+      if isinstance(layer_params, dict) and ('memory' in layer_params or 'memory_gate_proj' in layer_params or 'memory_gate' in layer_params):
         if 'attn' in layer_params:
           del layer_params['attn']
           

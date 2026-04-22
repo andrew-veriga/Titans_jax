@@ -74,10 +74,12 @@ class TitansBlock(_modules.Block):
         )
         
         # 1152 независимых вентиля
-        self.memory_gate = self.param(
-            'memory_gate', 
-            flax_nn.initializers.constant(0.0), 
-            (self.embed_dim,) # <-- Ключевое изменение: задаем размерность эмбеддинга
+        # ДИНАМИЧЕСКИЙ ВЕНТИЛЬ: вместо статического параметра используем Dense-слой
+        # для вычисления важности памяти на основе текущего токена
+        self.memory_gate_proj = flax_nn.Dense(
+            features=self.embed_dim, 
+            use_bias=False,
+            name='memory_gate_proj'
         )
         
     def __call__(
@@ -468,31 +470,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
             layer_name = f'layer_{i}'
             
             if isinstance(block, TitansBlock):
-                if is_training:
-                  if self.config.training_phase == 2:
-                    # Phase 2: stop_gradient before the first active Titans block to cut the
-                    # backward graph. Layers before titans_phase2_first_layer get zero grads
-                    # (optimizer partial_updates masks them anyway), but XLA only needs to
-                    # compile backward for layers from titans_phase2_first_layer to the loss.
-                    # titans_layer_indices stays unchanged to preserve checkpoint compatibility.
-                    if i == self.config.titans_phase2_first_layer:
-                        x = jax.lax.stop_gradient(x)
-                        x_prev = jax.lax.stop_gradient(x_prev)
-                    layer_cache_student, out_student = block(
-                        x,
-                        inputs.positions,
-                        old_cache.get(layer_name),
-                        s_mask,
-                        False,  # is_teacher_mode — positional, required for static_argnums=(5,)
-                        x_prev if block.diff_view else None,  # kv_seq
-                        current_huber_delta=current_huber_delta
-                    )
-                    x_prev = x
-                    x = out_student
-                    new_cache[layer_name] = layer_cache_student
-                  else:
-                    # Phase 1: teacher/student passes, teacher chain
-                    # 1. Teacher Pass (Full context)
+                if is_training and self.config.training_phase == 1:
+                    # PHASE 1: Teacher/Student distillation
+                    # 1. Teacher Pass (Full context, original Gemma Attention)
                     layer_cache_teacher, out_teacher = block(
                         x,
                         inputs.positions,
@@ -503,7 +483,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         current_huber_delta=current_huber_delta
                     )
 
-                    # 2. Student Pass (Truncated context, using the SAME input 'x')
+                    # 2. Student Pass (Truncated context, Pure Titans Memory)
                     layer_cache_student, out_student = block(
                         jax.lax.stop_gradient(x),
                         inputs.positions,
@@ -520,19 +500,31 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
                     layer_losses[f"raw_mse_{layer_name}"] = layer_loss
 
-                    # 4. Update x with Teacher's output to prevent Exposure Bias
+                    # 4. Teacher Chain: Update x with Teacher's output to prevent Exposure Bias
                     x_prev = x
                     x = out_teacher
-                    new_cache[layer_name] = layer_cache_teacher
+                    
+                    # 5. MERGE CACHE: Use Teacher's KV cache (for next layers) 
+                    # but Student's updated memory_state (to keep learning)
+                    merged_cache = dict(layer_cache_teacher)
+                    if 'memory_state' in layer_cache_student:
+                        merged_cache['memory_state'] = layer_cache_student['memory_state']
+                    new_cache[layer_name] = merged_cache
+
                 else:
-                    # INFERENCE MODE: Only run Student Pass
+                    # PHASE 2 / INFERENCE / EVAL: Pure Titans Memory (Student mode)
+                    if i == self.config.titans_phase2_first_layer and is_training:
+                        # Optimization for Phase 2 backprop
+                        x = jax.lax.stop_gradient(x)
+                        x_prev = jax.lax.stop_gradient(x_prev)
+                        
                     layer_cache_student, out_student = block(
-                        jax.lax.stop_gradient(x),
+                        x,
                         inputs.positions,
                         old_cache.get(layer_name),
-                        s_mask, # student mask
-                        is_teacher_mode=False,
-                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None,
+                        s_mask if s_mask is not None else inputs.attention_mask,
+                        False,  # is_teacher_mode
+                        x_prev if block.diff_view else None,
                         current_huber_delta=current_huber_delta
                     )
                     x_prev = x
@@ -551,6 +543,20 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 new_cache[layer_name] = layer_cache
             
         x = self.final_norm(x)
+        
+        # Add total distillation loss to satisfy Kauldron trainer expectations in Phase 1
+        if self.config.training_phase == 1 and is_training:
+            total_distill = jnp.zeros((), dtype=jnp.float32)
+            count = 0
+            for k, v in layer_losses.items():
+                if k.startswith("loss_layer_"):
+                    total_distill += jnp.mean(v)
+                    count += 1
+            if count > 0:
+                layer_losses['lm_loss'] = total_distill / count
+            else:
+                layer_losses['lm_loss'] = jnp.zeros((), dtype=jnp.float32)
+
         return x, new_cache, layer_losses
 
     def init_cache(
