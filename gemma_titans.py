@@ -55,10 +55,43 @@ class TitansBlock(_modules.Block):
     huber_loss_delta: base.ScalarOrSchedule = None
     neural_mem_heads: int = 8
     is_look_ahead: bool = False
-
+    use_original_attn: bool = True
 
     def setup(self):
-        super().setup()
+        from gemma.gm.nn import _layers
+        self.pre_attention_norm = _layers.RMSNorm()
+
+        self.attn = None
+        if self.use_original_attn:
+            self.attn = _modules.Attention(
+                num_heads=self.num_heads,
+                features=self.embed_dim,
+                head_dim=self.head_dim,
+                num_kv_heads=self.num_kv_heads,
+                attn_type=self.attn_type,
+                query_pre_attn_scalar=self.query_pre_attn_scalar,
+                rope_base_frequency=self.rope_base_frequency,
+                rope_scale_factor=self.rope_scale_factor,
+                attn_logits_soft_cap=self.attn_logits_soft_cap,
+                sliding_window_size=self.sliding_window_size,
+                use_qk_norm=self.use_qk_norm,
+            )
+
+        self.post_attention_norm = None
+        if self.use_post_attn_norm:
+            self.post_attention_norm = _layers.RMSNorm()
+
+        self.pre_ffw_norm = _layers.RMSNorm()
+
+        self.mlp = _modules.FeedForward(
+            features=self.embed_dim,
+            hidden_dim=self.hidden_dim,
+            transpose_gating_einsum=self.transpose_gating_einsum,
+        )
+
+        self.post_ffw_norm = None
+        if self.use_post_ffw_norm:
+            self.post_ffw_norm = _layers.RMSNorm()
 
         # Note: huber_loss_delta is now evaluated per-call if it's a schedule
         self.memory = NeuralMemory(
@@ -246,6 +279,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         elastic_net_lambda=self.config.neural_mem_elastic_lambda,
                         huber_loss_delta=self.config.neural_mem_huber_delta,
                         neural_mem_heads=self.config.neural_mem_heads,
+                        use_original_attn=False, # Phase 2 uses pure Titans
                     ))
                 else:
                     blocks.append(TitansBlock(
@@ -254,6 +288,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         elastic_net_lambda=self.config.neural_mem_elastic_lambda,
                         huber_loss_delta=self.config.neural_mem_huber_delta,
                         neural_mem_heads=self.config.neural_mem_heads,
+                        use_original_attn=True, # Phase 1 requires Gemma Attention for Teacher
                     ))
             else:
                 if self.config.training_phase == 2:
