@@ -47,8 +47,10 @@ def scale_by_adam_atan2(
   """Rescale updates by adam-atan2 algorithm."""
 
   def init_fn(params):
-    m = jax.tree_util.tree_map(jnp.zeros_like, params)
-    v = jax.tree_util.tree_map(jnp.zeros_like, params)
+    def _zeros(p):
+      return jnp.zeros_like(p, dtype=mu_dtype if mu_dtype is not None else p.dtype)
+    m = jax.tree_util.tree_map(_zeros, params)
+    v = jax.tree_util.tree_map(_zeros, params)
     return transform.ScaleByAdamState(count=jnp.zeros([], jnp.int32), mu=m, nu=v)
 
   def update_fn(updates, state, params=None):
@@ -64,6 +66,10 @@ def scale_by_adam_atan2(
       b2_t = b2
 
     del params
+
+    if mu_dtype is not None:
+      updates = jax.tree_util.tree_map(lambda g: jnp.asarray(g, dtype=mu_dtype), updates)
+
     mu = jax.tree_util.tree_map(
         lambda m, g: b1_t * m + (1 - b1_t) * g, state.mu, updates)
     nu = jax.tree_util.tree_map(
