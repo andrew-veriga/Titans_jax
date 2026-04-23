@@ -50,12 +50,12 @@ if not hasattr(_cache_helper._set_cache, '_is_titans_patched'):
 
 class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
-    diff_view: bool = False
+    diff_view: bool = False # If True, the QKV projections in the TitansBlock receive the "diff view" input (previous layer's output) instead of the current layer's input. This can help stabilize training by providing a more consistent signal to the memory across layers.
     elastic_net_lambda: Optional[float] = None
     huber_loss_delta: base.ScalarOrSchedule = None
     neural_mem_heads: int = 8
     is_look_ahead: bool = False
-    use_original_attn: bool = True
+    use_original_attn: bool = False
 
     def setup(self):
         from gemma.gm.nn import _layers
@@ -199,8 +199,8 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
     titans_layer_indices: tuple[int, ...] = (5, 11, 17, 23)
     is_training_mode: bool = True
-    neural_mem_qkv_receives_diff_view: bool = True
-    training_phase: int = 1  # 1: per-layer distillation, 2: LM fine-tuning
+    neural_mem_qkv_receives_diff_view: bool = True # If True, the QKV projections in the TitansBlock receive the "diff view" input (previous layer's output) instead of the current layer's input. This can help stabilize training by providing a more consistent signal to the memory across layers.
+    training_phase: int = 2  # 1: per-layer distillation, 2: LM fine-tuning and inference
     # Phase 2 only: stop_gradient is inserted before this layer to limit backward graph depth.
     # Must be one of titans_layer_indices. Smaller value = deeper backward = more compile RAM.
     # 23 → backward through 3 layers (~5GB compile RAM)
@@ -261,15 +261,24 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 transpose_gating_einsum=self.config.transpose_gating_einsum,
                 use_qk_norm=self.config.use_qk_norm,
                 rope_base_frequency=self.config.local_base_frequency
-                if attn_type == _modules.AttentionType.LOCAL_SLIDING
-                else self.config.global_base_frequency,
+                                    if attn_type == _modules.AttentionType.LOCAL_SLIDING
+                                    else self.config.global_base_frequency,
                 rope_scale_factor=self.config.local_scale_factor
-                if attn_type == _modules.AttentionType.LOCAL_SLIDING
-                else self.config.global_scale_factor,
+                                    if attn_type == _modules.AttentionType.LOCAL_SLIDING
+                                    else self.config.global_scale_factor,
             )
             
             if i in self.config.titans_layer_indices:
-                if self.config.training_phase == 2:
+                if self.config.training_phase == 1:
+                        blocks.append(TitansBlock(
+                        **block_kwargs,
+                        diff_view=self.config.neural_mem_qkv_receives_diff_view,
+                        elastic_net_lambda=self.config.neural_mem_elastic_lambda,
+                        huber_loss_delta=self.config.neural_mem_huber_delta,
+                        neural_mem_heads=self.config.neural_mem_heads,
+                        use_original_attn=True, # Phase 1 requires Gemma Attention for Teacher
+                    ))
+                else:
                     # static_argnums=(5,) marks is_teacher_mode as a compile-time constant.
                     # flax remat's core_fn receives variables as args[0], so user args are offset by 1:
                     # args[1]=x, args[2]=segment_pos, args[3]=cache, args[4]=attn_mask, args[5]=is_teacher_mode
@@ -281,17 +290,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         neural_mem_heads=self.config.neural_mem_heads,
                         use_original_attn=False, # Phase 2 uses pure Titans
                     ))
-                else:
-                    blocks.append(TitansBlock(
-                        **block_kwargs,
-                        diff_view=self.config.neural_mem_qkv_receives_diff_view,
-                        elastic_net_lambda=self.config.neural_mem_elastic_lambda,
-                        huber_loss_delta=self.config.neural_mem_huber_delta,
-                        neural_mem_heads=self.config.neural_mem_heads,
-                        use_original_attn=True, # Phase 1 requires Gemma Attention for Teacher
-                    ))
             else:
-                if self.config.training_phase == 2:
+                if self.config.training_phase !=1:
                     blocks.append(flax_nn.remat(_modules.Block)(**block_kwargs))
                 else:
                     blocks.append(_modules.Block(**block_kwargs))

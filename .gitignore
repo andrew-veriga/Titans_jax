@@ -32,3 +32,5 @@ colabs/gemma3_1b_it_params.pkl.orbax-checkpoint-tmp
 
 
 ./Titans_jax_Phase2_LM.ipynb
+docs/Titans_delta_METADATA
+docs/work_dir_METADATA
