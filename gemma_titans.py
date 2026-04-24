@@ -287,7 +287,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                                     else self.config.global_scale_factor,
             )
             
-            if i in self.config.titans_layer_indices:
+            if i in self.config.titans_layer_indices and i >= self.config.titans_phase2_first_layer:
                 if self.config.training_phase == 1:
                         blocks.append(TitansBlock(
                         **block_kwargs,
@@ -638,7 +638,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 dtype=dtype
             )
             
-            if i in self.config.titans_layer_indices:
+            if i in self.config.titans_layer_indices and i >= self.config.titans_phase2_first_layer:
                 mem_state = init_memory_state(
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
