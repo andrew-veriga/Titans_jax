@@ -211,7 +211,26 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     neural_mem_huber_delta: base.ScalarOrSchedule = None
     neural_mem_heads: int = 8  # Must match TitansBlock NeuralMemory(heads=...)
     is_look_ahead: bool = False
+    @classmethod
+    def from_gemma_config(
+        cls, 
+        ):
+        """
+        Правильный способ 'заливки': берем поля из gemma_config,
+        но фильтруем только те, что есть в текущем классе.
+        """
+        # Список имен полей, которые принимает наш конструктор
+        valid_field_names = {f.name for f in dataclasses.fields(cls)}
+        
+        # Извлекаем значения из оригинального конфига
+        config_dict = { 
+            f.name: getattr(_gemma.Gemma3_1B.config, f.name) 
+            for f in dataclasses.fields(_config.TransformerConfig) 
+            if f.name in valid_field_names 
+        }
+        return cls(**config_dict)
 
+        
 @flax.struct.dataclass
 class DistillationOutput:
     logits: jax.Array
