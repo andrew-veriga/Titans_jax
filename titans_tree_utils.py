@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, NamedTuple
+from collections.abc import Mapping
 
 _ParamsDict = dict[str, Any]
 
@@ -16,7 +17,7 @@ def migrate_static_gate_to_dynamic(params: _ParamsDict) -> _ParamsDict:
   """
   new_params = {}
   for key, value in params.items():
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
       if key == 'memory_gate':
         print("Migrating checkpoint: Found and removed old static 'memory_gate'.")
         continue  # Skip adding this key
@@ -36,7 +37,7 @@ def split_titans_params(params: _ParamsDict) -> SplittedParams:
 
   def _split_recursive(input_subtree, original_subtree, titans_subtree):
     for key, value in input_subtree.items():
-      if isinstance(value, dict):
+      if isinstance(value, Mapping):
         if key in ('memory', 'memory_gate_proj'):
           titans_subtree[key] = value
         else:
@@ -52,12 +53,12 @@ def split_titans_params(params: _ParamsDict) -> SplittedParams:
 
   # Remove empty dicts in titans_tree
   def _remove_empty_dicts(tree):
-    if not isinstance(tree, dict):
+    if not isinstance(tree, Mapping):
       return tree
 
     new_tree = {}
     for key, value in tree.items():
-      if isinstance(value, dict):
+      if isinstance(value, Mapping):
         sub_tree = _remove_empty_dicts(value)
         if sub_tree:  # Only add if subtree is not empty
           new_tree[key] = sub_tree
@@ -87,7 +88,7 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
       if key == 'memory_gate':
           continue
           
-      if isinstance(value, dict) and key in titans_subtree:
+      if isinstance(value, Mapping) and key in titans_subtree:
         new_tree[key] = _merge_recursive(value, titans_subtree[key])
       else:
         new_tree[key] = value
@@ -104,7 +105,7 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
   
   if remove_dead_attn:
     for layer_name, layer_params in merged.items():
-      if isinstance(layer_params, dict) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
+      if isinstance(layer_params, Mapping) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
         if 'attn' in layer_params:
           del layer_params['attn']
           
