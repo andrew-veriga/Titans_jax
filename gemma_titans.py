@@ -421,26 +421,28 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 # NOTE: no lax.scan here intentionally — scan adds compile-time graph complexity
                 # that causes CPU RAM OOM during XLA compilation on TPU v6e-1.
                 @jax.checkpoint
-                def _lm_loss(hidden, tgt):
+                def _lm_loss(hidden, tgt, valid_mask):
                     lc = self.embedder.decode(hidden)
                     if self.config.final_logit_softcap is not None:
                         lc /= self.config.final_logit_softcap
                         lc = jnp.tanh(lc) * self.config.final_logit_softcap
-                    
-                    loss = jnp.mean(
-                        optax.softmax_cross_entropy_with_integer_labels(
-                            lc.astype(jnp.float32), tgt
-                        ),
-                        axis=-1,
-                    )  # shape (batch,)
-                    
-                    # НОВОЕ: Вычисляем Accuracy внутри чекпоинта, пока логиты в памяти
-                    predicted_tokens = jnp.argmax(lc, axis=-1)
-                    accuracy = jnp.mean(predicted_tokens == tgt, axis=-1)
-                    
-                    return loss, accuracy
-
-                lm_loss, lm_acc = _lm_loss(x[:, :-1, :], tokens[:, 1:])
+                    # [B, T]
+                    ce = optax.softmax_cross_entropy_with_integer_labels(
+                        lc.astype(jnp.float32), tgt
+                    )
+                    # masked mean per sample
+                    valid_mask = valid_mask.astype(jnp.float32)
+                    denom = jnp.maximum(valid_mask.sum(axis=-1), 1.0)  # [B]
+                    loss = (ce * valid_mask).sum(axis=-1) / denom      # [B]
+                    pred = jnp.argmax(lc, axis=-1)                     # [B, T]
+                    acc = (
+                        ((pred == tgt).astype(jnp.float32) * valid_mask).sum(axis=-1)
+                        / denom
+                    )                                                  # [B]
+                    return loss, acc
+                tgt = tokens[:, 1:]                    # [B, T]
+                valid_mask = inputs.inputs_mask[:, 1:] # [B, T]  <- важно
+                lm_loss, lm_acc = _lm_loss(x[:, :-1, :], tgt, valid_mask)
                 layer_losses['lm_loss'] = lm_loss
                 layer_losses['lm_accuracy'] = lm_acc
                 
