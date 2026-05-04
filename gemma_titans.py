@@ -549,9 +549,20 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     )
 
                     # 3. Layer Loss
-                    raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
-                    layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
-                    layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
+                    # Косинусный loss (не чувствителен к масштабу):
+                    def cosine_loss(a, b, axis=-1):
+                        cos = jnp.sum(a * b, axis=axis) / (
+                            jnp.linalg.norm(a, axis=axis) * jnp.linalg.norm(b, axis=axis) + 1e-8)
+                        return 1 - cos
+                    
+
+                    # raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
+                    # layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
+                    layer_loss = cosine_loss(
+                        out_student.reshape(out_student.shape[0], -1),
+                        jax.lax.stop_gradient(out_teacher).reshape(out_teacher.shape[0], -1)
+                    )
+                    # layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
                     layer_losses[f"raw_mse_{layer_name}"] = layer_loss
 
                     # 4. Teacher Chain: Update x with Teacher's output to prevent Exposure Bias
