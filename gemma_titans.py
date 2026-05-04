@@ -102,9 +102,12 @@ class TitansBlock(_modules.Block):
         # 1152 независимых вентиля
         # ДИНАМИЧЕСКИЙ ВЕНТИЛЬ: вместо статического параметра используем Dense-слой
         # для вычисления важности памяти на основе текущего токена
+        # bias_init=+2.0 → sigmoid(2) ≈ 0.88: gate изначально "открыт"
         self.memory_gate_proj = flax_nn.Dense(
             features=self.embed_dim, 
-            use_bias=False,
+            use_bias=True,
+            kernel_init=flax_nn.initializers.lecun_normal(),
+            bias_init=flax_nn.initializers.constant(2.0),
             name='memory_gate_proj'
         )
         
@@ -556,13 +559,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         return 1 - cos
                     
 
-                    # raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
-                    # layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
-                    layer_loss = cosine_loss(
-                        out_student.reshape(out_student.shape[0], -1),
-                        jax.lax.stop_gradient(out_teacher).reshape(out_teacher.shape[0], -1)
-                    )
-                    # layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
+                    raw_diff = (out_student - jax.lax.stop_gradient(out_teacher)) ** 2
+                    layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
+                    layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
                     layer_losses[f"raw_mse_{layer_name}"] = layer_loss
 
                     # 4. Teacher Chain: Update x with Teacher's output to prevent Exposure Bias
