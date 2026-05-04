@@ -551,21 +551,26 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         current_huber_delta=current_huber_delta
                     )
 
-                    # 3. Layer Loss
-                     # 3. Layer Loss: Delta-Cosine
+                    # 3. Layer Loss: Normalized Delta-MSE
+
                     # Сравниваем "что attention добавил к x" vs "что memory добавил к x"
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
                     
-                    # Косинус по dim D, mean по токенам
-                    cos_per_token = jnp.sum(
-                        delta_student * delta_teacher, axis=-1
-                    ) / (
-                        jnp.linalg.norm(delta_student, axis=-1) * 
-                        jnp.linalg.norm(delta_teacher, axis=-1) + 1e-8
-                    )  # (B, L)
-                    layer_loss = (1 - cos_per_token).mean(axis=-1)  # (B,)
-                    layer_losses[f"loss_{layer_name}"] = layer_loss
+                    # L2-normalize через rsqrt (одна инструкция TPU, нет деления)
+                    inv_norm_t = jax.lax.rsqrt(
+                        jnp.sum(delta_teacher ** 2, axis=-1, keepdims=True) + 1e-8)
+                    inv_norm_s = jax.lax.rsqrt(
+                        jnp.sum(delta_student ** 2, axis=-1, keepdims=True) + 1e-8)
+                    
+                    dt_norm = delta_teacher * inv_norm_t
+                    ds_norm = delta_student * inv_norm_s
+                    
+                    # MSE на единичных векторах = чистая разница направлений
+                    raw_diff = (ds_norm - dt_norm) ** 2
+                    layer_loss = jnp.mean(raw_diff, axis=(1, 2), dtype=jnp.float32)
+                    layer_losses[f"loss_{layer_name}"] = jnp.log1p(layer_loss)
+ 
                     # layer_losses[f"raw_mse_{layer_name}"] = layer_loss
                     
                     # 4. Teacher Chain: Update x with Teacher's output to prevent Exposure Bias
