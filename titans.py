@@ -7,7 +7,6 @@ import jax.numpy as jnp
 from jax import Array
 import flax.linen as nn
 import optax
-from optax._src import base
 from einops import rearrange, repeat, pack, unpack
 
 from associative_scan import associative_scan, binary_operator, pad_at_dim
@@ -112,9 +111,11 @@ def huber_loss(pred, target, delta=0.1, **kwargs):
     )
     return jnp.mean(loss, axis=-1)
 
-def init_memory_state(batch_size: int, dim: int, heads: int, dim_head: Optional[int] = None, mlp_depth: int = 2, *, dtype: Any):
-    """Standalone function to initialize memory state without Module scope issues."""
-    dim_head = default(dim_head, dim // heads if dim_head is None else dim_head)
+def init_memory_state(batch_size: int, dim: int, neural_mem_kwargs: dict, *, dtype):
+    mem = default(neural_mem_kwargs, {})
+    heads = mem.get('heads', 1)
+    dim_head = mem.get('dim_head', dim // heads)
+    mlp_depth = mem.get('mlp_depth', 2)
     
     params = {}
     key = jax.random.PRNGKey(0)
@@ -234,28 +235,40 @@ def apply_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
 
 class NeuralMemory(nn.Module):
     dim: int
-    chunk_size: int = 1
-    dim_head: Optional[int] = None
-    heads: int = 1
-    model: Optional[nn.Module] = None
-    store_memory_loss_fn: Callable = default_loss_fn
-    adaptive_step_transform: Callable = default_adaptive_step_transform
-    pre_rmsnorm: bool = True
-    post_rmsnorm: bool = True
-    max_grad_norm: Optional[float] = None
-    elastic_net_lambda: Optional[float] = None
-    default_mlp_kwargs: dict = None
-    diff_view: bool = False
-    is_look_ahead: bool = False
+    neural_mem_kwargs: dict = None  # <-- единый словарь
+    # chunk_size: int = 1
+    # dim_head: Optional[int] = None
+    # heads: int = 1
+    # store_memory_loss_fn: Callable = default_loss_fn
+
+    # max_grad_norm: Optional[float] = None
+    # elastic_net_lambda: Optional[float] = None
+    # default_mlp_kwargs: dict = None
+    # diff_view: bool = False
+    # is_look_ahead: bool = False
 
     def setup(self):
-        dim_head = default(self.dim_head, self.dim // self.heads if self.dim_head is None else self.dim_head)
-        dim_inner = dim_head * self.heads
+        self.adaptive_step_transform = default_adaptive_step_transform
+        self.pre_rmsnorm = True
+        self.post_rmsnorm = True
+        
+        mem = default(self.neural_mem_kwargs, {})
+        self.heads = mem.get('heads', 1)
+        self.dim_head = mem.get('dim_head', self.dim // self.heads)
+        self.chunk_size = mem.get('chunk_size', 1)
+        self.max_grad_norm = mem.get('max_grad_norm', None)
+        self.elastic_net_lambda = mem.get('elastic_net_lambda', None)
+        self.mlp_depth = mem.get('mlp_depth', 2)
+        self.diff_view = mem.get('diff_view', False)
+        self.is_look_ahead = mem.get('is_look_ahead', False)
+        self.store_memory_loss_fn = mem.get('store_memory_loss_fn', default_loss_fn)
+
+        
 
         self.retrieve_norm = nn.RMSNorm(use_scale=True) if self.pre_rmsnorm else identity
         self.store_norm = nn.RMSNorm(use_scale=True) if self.pre_rmsnorm else identity
         
-        self.multihead_rmsnorm = MultiheadRMSNorm(dim_head, self.heads) if self.post_rmsnorm else identity
+        self.multihead_rmsnorm = MultiheadRMSNorm(self.dim_head, self.heads) if self.post_rmsnorm else identity
 
         self.combine_heads = nn.Dense(self.dim, use_bias=False) if self.heads > 1 else identity
         
@@ -267,22 +280,16 @@ class NeuralMemory(nn.Module):
         else:
             self.retrieve_gate = None
 
-        if not exists(self.model):
-            mlp_kwargs = default(self.default_mlp_kwargs, {'depth': 2})
-            self.memory_model = MemoryMLP(dim_head, **mlp_kwargs)
-        else:
-            self.memory_model = self.model
+        self.memory_model = MemoryMLP(self.dim_head, depth=self.mlp_depth)
 
+        dim_inner = self.dim_head * self.heads
         self.to_queries = nn.Dense(dim_inner, use_bias=False)
+        self.to_keys = nn.Dense(dim_inner, use_bias=False)
         self.to_keys_values = nn.Dense(dim_inner * 2, use_bias=False)
 
         self.to_momentum = nn.Dense(self.heads, use_bias=False)
 
-        mlp_depth = 2
-        if exists(self.default_mlp_kwargs):
-            mlp_depth = self.default_mlp_kwargs.get('depth', 2)
-
-        self.to_adaptive_step = nn.Dense(self.heads * mlp_depth, use_bias=False)
+        self.to_adaptive_step = nn.Dense(self.heads * self.mlp_depth, use_bias=False)
         self.to_decay_factor = nn.Dense(self.heads, use_bias=False)
 
         self.empty_memory_embed = self.param('empty_memory_embed', nn.initializers.normal(stddev=0.02), (self.dim,))
@@ -296,8 +303,6 @@ class NeuralMemory(nn.Module):
         self.grad_fn = forward_and_loss
 
         # attention pooling для получения весов внутри чанков для momentum и decay factor:
-        
-        
         # Объявляем слои для attention pooling как атрибуты модуля
         pool_hidden_dim = self.dim // self.heads
         self.chunk_pool_layer1 = nn.Dense(pool_hidden_dim, use_bias=False)
@@ -305,11 +310,7 @@ class NeuralMemory(nn.Module):
 
 
     def init_state(self, batch_size: int, *, dtype: Any):
-        mlp_depth = 2
-        if exists(self.default_mlp_kwargs):
-            mlp_depth = self.default_mlp_kwargs.get('depth', 2)
-            
-        return init_memory_state(batch_size, self.dim, self.heads, self.dim_head, mlp_depth, dtype=dtype)
+        return init_memory_state(batch_size, self.dim, self.neural_mem_kwargs, dtype=dtype)
 
     def store_memories(self, seq, past_state, kv_seq=None, loss_kwargs=None):
         """
@@ -400,9 +401,6 @@ class NeuralMemory(nn.Module):
         grad_fn = jax.grad(self.grad_fn)
 
         def scan_step(carry, xs):
-            mlp_depth = 2
-            if exists(self.default_mlp_kwargs):
-                mlp_depth = self.default_mlp_kwargs.get('depth', 2)
             k, lr, v = xs
             # lr сейчас имеет форму (batch*heads, chunk_size, depth)
 
@@ -425,7 +423,7 @@ class NeuralMemory(nn.Module):
             lr_mean = jnp.mean(lr, axis=1)   
             
             # Применяем: expanding dims, чтобы скаляр (batch*heads, 1, 1) умножился на матрицу (batch*heads, dim, dim)
-            for i in range(mlp_depth):
+            for i in range(self.mlp_depth):
                 g[f'weight_{i}'] = g[f'weight_{i}'] * lr_mean[:, i][:, None, None]
 
             return carry, g

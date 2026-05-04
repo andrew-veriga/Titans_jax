@@ -27,7 +27,6 @@ os.environ['KAULDRON_TYPECHECK'] = '0'
 os.environ['KD_CHECK_TYPES'] = '0'
 import importlib
 import optax
-from optax._src import base
 import titans
 importlib.reload(titans)
 
@@ -50,11 +49,7 @@ if not hasattr(_cache_helper._set_cache, '_is_titans_patched'):
 
 class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
-    diff_view: bool = False # If True, the QKV projections in the TitansBlock receive the "diff view" input (previous layer's output) instead of the current layer's input. This can help stabilize training by providing a more consistent signal to the memory across layers.
-    elastic_net_lambda: Optional[float] = None
-    huber_loss_delta: base.ScalarOrSchedule = None
-    neural_mem_heads: int = 8
-    is_look_ahead: bool = False
+    neural_mem_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
     use_original_attn: bool = False
 
     def setup(self):
@@ -93,17 +88,15 @@ class TitansBlock(_modules.Block):
         if self.use_post_ffw_norm:
             self.post_ffw_norm = _layers.RMSNorm()
 
-        # Note: huber_loss_delta is now evaluated per-call if it's a schedule
+        mem_kwargs = dict(self.neural_mem_kwargs or {})
+        self.diff_view = mem_kwargs.get('diff_view', False)
+
+        # Note: huber_loss_delta is evaluated per-call if it's a schedule.
         self.memory = NeuralMemory(
             dim=self.embed_dim,
-            heads=self.neural_mem_heads,
-            dim_head=256,
-            chunk_size=32,
-            max_grad_norm=0.5,
-            elastic_net_lambda=self.elastic_net_lambda,
-            diff_view=self.diff_view,
-            is_look_ahead=self.is_look_ahead,
-            store_memory_loss_fn=huber_loss if self.huber_loss_delta is not None else default_loss_fn
+            neural_mem_kwargs={
+                **mem_kwargs,
+            }
         )
         
         # 1152 независимых вентиля
@@ -198,8 +191,21 @@ class TitansBlock(_modules.Block):
 class Gemma_Titans_Config(_config.TransformerConfig):
     """Configuration for Gemma3 with Titans NLTM."""
     titans_layer_indices: tuple[int, ...] = (5, 11, 17, 23)
+    neural_mem_kwargs: Dict[str, Any] = dataclasses.field(default_factory=lambda: {
+            'heads': 8,
+            'dim_head': 256,
+            'chunk_size': 32,
+            'max_grad_norm': 0.5,
+            'elastic_net_lambda': None,
+            'mlp_depth': 2,
+            'diff_view': False,
+            'is_look_ahead': False,
+            'huber_loss_delta': None,
+            'store_memory_loss_fn': default_loss_fn,
+        }
+    )
+
     is_training_mode: bool = True
-    neural_mem_qkv_receives_diff_view: bool = True # If True, the QKV projections in the TitansBlock receive the "diff view" input (previous layer's output) instead of the current layer's input. This can help stabilize training by providing a more consistent signal to the memory across layers.
     training_phase: int = 2  # 1: per-layer distillation, 2: LM fine-tuning and inference
     # Phase 2 only: stop_gradient is inserted before this layer to limit backward graph depth.
     # Must be one of titans_layer_indices. Smaller value = deeper backward = more compile RAM.
@@ -207,10 +213,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     # 17 → backward through 9 layers (~25GB compile RAM)
     # 11 → backward through 15 layers (~70GB compile RAM)
     titans_phase2_first_layer: int = 23
-    neural_mem_elastic_lambda: Optional[float] = None
-    neural_mem_huber_delta: base.ScalarOrSchedule = None
-    neural_mem_heads: int = 8  # Must match TitansBlock NeuralMemory(heads=...)
-    is_look_ahead: bool = False
+
     @classmethod
     def from_gemma_config(
         cls, 
@@ -291,10 +294,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 if self.config.training_phase == 1:
                         blocks.append(TitansBlock(
                         **block_kwargs,
-                        diff_view=self.config.neural_mem_qkv_receives_diff_view,
-                        elastic_net_lambda=self.config.neural_mem_elastic_lambda,
-                        huber_loss_delta=self.config.neural_mem_huber_delta,
-                        neural_mem_heads=self.config.neural_mem_heads,
+                        neural_mem_kwargs=self.config.neural_mem_kwargs,
+
                         use_original_attn=True, # Phase 1 requires Gemma Attention for Teacher
                     ))
                 else:
@@ -303,10 +304,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     # args[1]=x, args[2]=segment_pos, args[3]=cache, args[4]=attn_mask, args[5]=is_teacher_mode
                     blocks.append(flax_nn.remat(TitansBlock, static_argnums=(5,))(
                         **block_kwargs,
-                        diff_view=self.config.neural_mem_qkv_receives_diff_view,
-                        elastic_net_lambda=self.config.neural_mem_elastic_lambda,
-                        huber_loss_delta=self.config.neural_mem_huber_delta,
-                        neural_mem_heads=self.config.neural_mem_heads,
+                        neural_mem_kwargs=self.config.neural_mem_kwargs,
                         use_original_attn=False, # Phase 2 uses pure Titans
                     ))
             else:
@@ -381,11 +379,12 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
 
         # Evaluate huber delta if it's a schedule
         current_huber_delta = None
-        if self.config.neural_mem_huber_delta is not None:
-            if callable(self.config.neural_mem_huber_delta):
-                current_huber_delta = self.config.neural_mem_huber_delta(step_scalar)
+        huber_delta_cfg = self.config.neural_mem_kwargs.get('huber_loss_delta')
+        if huber_delta_cfg is not None:
+            if callable(huber_delta_cfg):
+                current_huber_delta = huber_delta_cfg(step_scalar)
             else:
-                current_huber_delta = self.config.neural_mem_huber_delta
+                current_huber_delta = huber_delta_cfg
 
         with _dtype_params.initialize_param_with_dtype(
             self.dtype,
@@ -644,8 +643,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 mem_state = init_memory_state(
                     batch_size=batch_size,
                     dim=self.config.embed_dim,
-                    heads=self.config.neural_mem_heads,
-                    dim_head=256,
+                    neural_mem_kwargs=self.config.neural_mem_kwargs,
                     dtype=dtype
                 )
                 attn_cache['memory_state'] = mem_state
