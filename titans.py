@@ -111,7 +111,7 @@ def huber_loss(pred, target, delta=0.1, **kwargs):
     )
     return jnp.mean(loss, axis=-1)
 
-def init_memory_state(batch_size: int, dim: int, neural_mem_kwargs: dict, *, dtype):
+def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype):
     mem = default(neural_mem_kwargs, {})
     heads = mem.get('heads', 1)
     dim_head = mem.get('dim_head', dim // heads)
@@ -119,15 +119,22 @@ def init_memory_state(batch_size: int, dim: int, neural_mem_kwargs: dict, *, dty
     
     params = {}
     key = jax.random.PRNGKey(0)
+    
+    # Было: одна матрица на все головы
+    # for i in range(mlp_depth):
+    #     key, subkey = jax.random.split(key)
+    #     params[f'weight_{i}'] = (jax.random.normal(subkey, (dim_head, dim_head)) * 0.02).astype(dtype)
+    
+    # Стало: отдельная случайная матрица для каждой головы
     for i in range(mlp_depth):
         key, subkey = jax.random.split(key)
-        params[f'weight_{i}'] = (jax.random.normal(subkey, (dim_head, dim_head)) * 0.02).astype(dtype)
-        
-    # Expand params to (batch, heads, ...) to be compatible with Gemma's batch dim flattening
-    def expand_and_init(p):
-        return repeat(p, '... -> b h ...', b=batch_size, h=heads)
-        
-    initial_weights = jax.tree_util.tree_map(expand_and_init, params)
+        # (batch, heads, dim_head, dim_head) — каждая голова уникальна
+        params[f'weight_{i}'] = (
+            jax.random.normal(subkey, (batch_size, heads, dim_head, dim_head)) * 0.02
+        ).astype(dtype)
+    
+    # Больше не нужен repeat — уже правильная форма
+    initial_weights = params
     momentum = jax.tree_util.tree_map(jnp.zeros_like, initial_weights)
     
     return (initial_weights, momentum)
