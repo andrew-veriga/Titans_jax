@@ -268,13 +268,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         )
         # for the fused cosine similarity loss in phase 1 distillation: 1/√D to keep sim in [-1, 1]:
         # dimension_numbers for (B,L,D)·(B,L,D) → (B,L)
-        self.dn = (((2,), (2,)), ((0, 1), (0, 1)))  # contract D, batch (B,L)
-        # scale factor 
-        # import math
-        self.scale = 1.0 / jnp.sqrt(1152)
-        # self.scale = 1.0 / jnp.sqrt(jnp.float32(self.config.embed_dim))  # 1/√1152 ≈ 0.029
-
-
+        
         blocks = []
         num_layers = len(self.config.attention_types)
         for i, attn_type in zip(range(num_layers), self.config.attention_types):
@@ -562,13 +556,16 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                      # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
-                    
-                    sim = jax.lax.dot_general(
-                        delta_student, delta_teacher,
+                    dt_prob = jax.nn.softmax(delta_teacher, axis=-1)       # target distribution
+                    ds_log = jax.nn.log_softmax(delta_student, axis=-1)    # student log-probs
+
+                    # Cross-Entropy = -Σ target · log(student)
+                    nll = -jax.lax.dot_general(
+                        dt_prob, ds_log,
                         (((2,), (2,)), ((0, 1), (0, 1)))
-                    ) * self.scale  # scalar multiply → sum(Δs·Δt)/√D
+                    ) 
                     
-                    layer_loss = (1.0 - sim).mean(axis=-1)  # (B,), ∈ [0, 2]
+                    layer_loss = nll.mean(axis=-1)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
                     
                     
