@@ -35,3 +35,4 @@ docs/work_dir_METADATA
 docs/_METADATA (1)
 downloaded_gemma_titans.py
 check_merged_params.py
+scaled_dot_example.py

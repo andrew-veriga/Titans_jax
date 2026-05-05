@@ -270,8 +270,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         # dimension_numbers for (B,L,D)·(B,L,D) → (B,L)
         self.dn = (((2,), (2,)), ((0, 1), (0, 1)))  # contract D, batch (B,L)
         # scale factor 
-        import math
-        self.scale = 1.0 / math.sqrt(1152)
+        # import math
+        self.scale = 1.0 / jnp.sqrt(1152)
         # self.scale = 1.0 / jnp.sqrt(jnp.float32(self.config.embed_dim))  # 1/√1152 ≈ 0.029
 
 
@@ -563,12 +563,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
                     
-                    sim = jax.lax.scaled_dot(
+                    sim = jax.lax.dot_general(
                         delta_student, delta_teacher,
-                        lhs_scale=self.scale,
-                        dimension_numbers=self.dn,
-                        preferred_element_type=jnp.bfloat16
-                    )  # (B, L) — fused sum(Δs·Δt)/√D
+                        (((2,), (2,)), ((0, 1), (0, 1)))
+                    ) * self.scale  # scalar multiply → sum(Δs·Δt)/√D
                     
                     layer_loss = (1.0 - sim).mean(axis=-1)  # (B,), ∈ [0, 2]
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
