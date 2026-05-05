@@ -258,7 +258,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
     step: kontext.Key = "step"
 
     def setup(self):
-
+        
         self.embedder = _modules.Embedder(
             vocab_size=self.config.num_embed,
             embed_dim=self.config.embed_dim,
@@ -270,7 +270,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         # dimension_numbers for (B,L,D)·(B,L,D) → (B,L)
         self.dn = (((2,), (2,)), ((0, 1), (0, 1)))  # contract D, batch (B,L)
         # scale factor 
-        self.scale = 1.0 / jnp.sqrt(jnp.float32(self.config.embed_dim))  # 1/√1152 ≈ 0.029
+        import math
+        self.scale = 1.0 / math.sqrt(1152)
+        # self.scale = 1.0 / jnp.sqrt(jnp.float32(self.config.embed_dim))  # 1/√1152 ≈ 0.029
 
 
         blocks = []
