@@ -158,7 +158,8 @@ class TitansBlock(_modules.Block):
             )
             # Динамический вентиль: вычисляется на основе входного вектора
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
-            
+            retrieved = jnp.tanh(retrieved) # O(1), bounds to [-1, 1]
+
             # ЧИСТАЯ ЗАМЕНА: Оригинальный attn_output больше не прибавляется!
             combined_output = gate * retrieved
             

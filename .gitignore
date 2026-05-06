@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+.env
 
 .vscode/
 deepmind_finetuning.ipynb
@@ -33,6 +34,10 @@ colabs/gemma3_1b_it_params.pkl.orbax-checkpoint-tmp
 docs/Titans_delta_METADATA
 docs/work_dir_METADATA
 docs/_METADATA (1)
-downloaded_gemma_titans.py
+
 check_merged_params.py
 scaled_dot_example.py
+.env.example
+precompute_openwebtext.py
+check_hf_dataset.py
+colabs/fast_dataset_loader.py
