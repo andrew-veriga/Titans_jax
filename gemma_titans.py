@@ -107,7 +107,7 @@ class TitansBlock(_modules.Block):
             features=self.embed_dim, 
             use_bias=True,
             kernel_init=flax_nn.initializers.lecun_normal(),
-            bias_init=flax_nn.initializers.constant(2.0),
+            bias_init=flax_nn.initializers.constant(1.0),
             name='memory_gate_proj'
         )
         
@@ -140,6 +140,7 @@ class TitansBlock(_modules.Block):
             )
             combined_output = attn_output
             next_mem_state = mem_state # Memory state doesn't change in teacher mode
+            avg_mem_loss = jnp.zeros((), dtype=jnp.float32)  # No memory loss in teacher mode
         else:
             # 2. Student mode (Phase 1) / Phase 2 / Inference:
             # Pure Titans memory, NO original Gemma attention
@@ -148,7 +149,7 @@ class TitansBlock(_modules.Block):
             if current_huber_delta is not None:
                 loss_kwargs['delta'] = current_huber_delta
 
-            retrieved, next_mem_state = self.memory(
+            retrieved, next_mem_state, avg_mem_loss = self.memory(
                 inputs_normalized,
                 memory_state=mem_state,
                 return_next_memories=True,
@@ -185,6 +186,7 @@ class TitansBlock(_modules.Block):
         if cache is not None:
             new_cache = dict(new_attn_cache)
             new_cache['memory_state'] = next_mem_state
+            new_cache['avg_mem_loss'] = avg_mem_loss  # Store memory loss metric in cache
         else:
             new_cache = None
 
@@ -552,20 +554,15 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None,
                         current_huber_delta=current_huber_delta
                     )
+                    
+                    # 2b. Log memory MSE loss (from student's memory update)
+                    if layer_cache_student is not None and 'avg_mem_loss' in layer_cache_student:
+                        layer_losses[f"mem_loss_{layer_name}"] = layer_cache_student['avg_mem_loss']
 
                      # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
-                    dt_prob = jax.nn.softmax(delta_teacher, axis=-1)       # target distribution
-                    ds_log = jax.nn.log_softmax(delta_student, axis=-1)    # student log-probs
-
-                    # Cross-Entropy = -Σ target · log(student)
-                    nll = -jax.lax.dot_general(
-                        dt_prob, ds_log,
-                        (((2,), (2,)), ((0, 1), (0, 1)))
-                    ) 
-                    
-                    layer_loss = nll.mean(axis=-1)
+                    layer_loss = self.cos_by_softmax(delta_teacher, delta_student)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
                     
                     
@@ -599,6 +596,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         x_prev if block.diff_view else None,
                         current_huber_delta=current_huber_delta
                     )
+                    # Log memory MSE loss (works in both Phase 2 and inference)
+                    if layer_cache_student is not None and 'avg_mem_loss' in layer_cache_student:
+                        layer_losses[f"mem_loss_{layer_name}"] = layer_cache_student['avg_mem_loss']
                     x_prev = x
                     x = out_student
                     new_cache[layer_name] = layer_cache_student
@@ -631,6 +631,41 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 layer_losses['lm_loss'] = jnp.zeros((x.shape[0],), dtype=jnp.bfloat16)
 
         return x, new_cache, layer_losses
+
+    def cos_by_softmax(self, delta_teacher, delta_student):
+        """
+        Scaled Dot Product (fused cosine-like)
+        """
+        dt_prob = jax.nn.softmax(delta_teacher, axis=-1)       # target distribution
+        ds_log = jax.nn.log_softmax(delta_student, axis=-1)    # student log-probs
+
+                    # Cross-Entropy = -Σ target · log(student)
+        nll = -jax.lax.dot_general(
+                        dt_prob, ds_log,
+                        (((2,), (2,)), ((0, 1), (0, 1)))
+                    ) 
+                    
+        layer_loss = nll.mean(axis=-1)
+        return layer_loss
+    
+    def normalized_mse(self, delta_teacher, delta_student):
+        """
+        ||û - v̂||² = 2(1 - cos(θ))
+        """
+        inv_norm_t = jax.lax.rsqrt(
+            jnp.einsum('bld,bld->bl', delta_teacher, delta_teacher)[..., None] + 1e-8
+            )
+        inv_norm_s = jax.lax.rsqrt(
+            jnp.einsum('bld,bld->bl', delta_student, delta_student)[..., None] + 1e-8
+            )
+                            
+        dt_norm = delta_teacher * inv_norm_t
+        ds_norm = delta_student * inv_norm_s
+                            
+        # SUM по D, MEAN по токенам — сохраняет масштаб
+        raw_diff = (ds_norm - dt_norm) ** 2
+        layer_loss = jnp.mean(jnp.sum(raw_diff, axis=-1), axis=-1)  # (B,)
+        return layer_loss
 
     def init_cache(
         self,

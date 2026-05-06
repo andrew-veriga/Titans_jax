@@ -94,7 +94,7 @@ class MemoryMLP(nn.Module):
         return x
 
 
-def default_adaptive_step_transform(adaptive_step, max_lr=1e-2):
+def default_adaptive_step_transform(adaptive_step, max_lr=1e-3):
     return jax.nn.sigmoid(adaptive_step) * max_lr
 
 
@@ -405,7 +405,7 @@ class NeuralMemory(nn.Module):
         )
         
         # Create the gradient function from forward_and_loss
-        grad_fn = jax.grad(self.grad_fn)
+        grad_fn = jax.value_and_grad(self.grad_fn)
 
         def scan_step(carry, xs):
             k, lr, v = xs
@@ -417,7 +417,7 @@ class NeuralMemory(nn.Module):
 
             # 1. Получаем сырые градиенты (PyTree словарей с 'weight_0', 'weight_1' и т.д.)
             # Заметь: grad_fn больше не принимает lr
-            g = jax.vmap(partial(grad_fn, **loss_kwargs))(past_weights_bh, k, v)
+            loss, g = jax.vmap(partial(grad_fn, **loss_kwargs))(past_weights_bh, k, v)
 
             # Guard 2: zero out any NaN/Inf gradients before applying them
             g = jax.tree_util.tree_map(
@@ -433,16 +433,18 @@ class NeuralMemory(nn.Module):
             for i in range(self.mlp_depth):
                 g[f'weight_{i}'] = g[f'weight_{i}'] * lr_mean[:, i][:, None, None]
 
-            return carry, g
+            return carry, (g, loss)
 
         scan_step_ckp = jax.checkpoint(scan_step)
 
-        _, grads = jax.lax.scan(
-            scan_step_ckp,
-            init=None,
-            xs=(keys, adaptive_lr_chunked, values)
-        )
+        _, (grads, mem_losses) = jax.lax.scan(
+                scan_step_ckp,
+                init=None,
+                xs=(keys, adaptive_lr_chunked, values)
+            )
+        avg_mem_loss = jnp.mean(mem_losses) 
         
+        # scalar
         # restore to (b h n) ... so subsequent code remains unchanged
         grads = jax.tree_util.tree_map(
             lambda t: rearrange(t, 'n (b h) ... -> (b h n) ...', b=batch, h=self.heads), 
@@ -492,7 +494,7 @@ class NeuralMemory(nn.Module):
         
         last_momentum = jax.tree_util.tree_map(lambda t: t[:, :, -1], next_momentum)
         
-        return updates, (next_weights, last_momentum)
+        return updates, (next_weights, last_momentum), avg_mem_loss
 
     def retrieve_memories(self, seq, weights_with_updates):
         batch, seq_len = seq.shape[:2]
@@ -571,7 +573,7 @@ class NeuralMemory(nn.Module):
         if not exists(memory_state):
             memory_state = self.init_state(batch, dtype=seq.dtype)
 
-        updates, next_mem_state = self.store_memories(seq, memory_state, kv_seq=kv_seq, loss_kwargs=loss_kwargs)
+        updates, next_mem_state, avg_mem_loss = self.store_memories(seq, memory_state, kv_seq=kv_seq, loss_kwargs=loss_kwargs)
         
         past_weights, _ = memory_state
         
@@ -588,4 +590,4 @@ class NeuralMemory(nn.Module):
         if not return_next_memories:
             return retrieved
             
-        return retrieved, next_mem_state
+        return retrieved, next_mem_state, avg_mem_loss
