@@ -40,4 +40,3 @@ scaled_dot_example.py
 .env.example
 precompute_openwebtext.py
 check_hf_dataset.py
-colabs/fast_dataset_loader.py
