@@ -54,7 +54,7 @@ def get_fast_openwebtext(
     seed: int = 42,
     num_epochs: int | None = None,
     token: str | None = None,
-) -> kd.data.py.Pipeline:
+) -> kd.data.Pipeline:
     """
     Create a Kauldron dataset pipeline from pre-tokenized HuggingFace dataset.
 
@@ -76,14 +76,15 @@ def get_fast_openwebtext(
     hf_token = token or os.environ.get("HF_TOKEN")
 
     print(f"⚡ Loading pre-tokenized dataset from {repo_id} (split='{split}')...")
-    hf_ds = load_dataset(repo_id, split=split, token=hf_token)
-    print(f"   {len(hf_ds):,} documents loaded")
+    # hf_ds = load_dataset(repo_id, split=split, token=hf_token)
+    # print(f"   {len(hf_ds):,} documents loaded")
 
-    return kd.data.py.Pipeline(
-        seed=seed,
-        data_source=kd.data.py.HuggingFace(hf_ds),
-        shuffle=shuffle,
-        num_epochs=num_epochs,
+    return kd.data.py.HuggingFace(
+        path=repo_id, 
+        split="train", 
+        shuffle=True, 
+        num_workers=1,
+        num_epochs=None,
         batch_size=batch_size,
         transforms=[
             _PadToLength(max_length=max_length),
