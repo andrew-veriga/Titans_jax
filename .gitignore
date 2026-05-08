@@ -37,4 +37,6 @@ downloaded_gemma_titans.py
 check_merged_params.py
 scaled_dot_example.py
 .env
-.env.example
+
+tokenized_openwebtext_filtered
+DATASET_CARD.md
