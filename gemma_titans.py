@@ -208,7 +208,9 @@ class Gemma_Titans_Config(_config.TransformerConfig):
             'diff_view': False,
             'is_look_ahead': False,
             'huber_loss_delta': None,
-            'store_memory_loss_fn': default_loss_fn,
+            # store_memory_loss_fn auto-selected by NeuralMemory.setup():
+            #   huber_loss_delta is not None → huber_loss
+            #   huber_loss_delta is None      → default_loss_fn (MSE)
         }
     )
 

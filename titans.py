@@ -268,7 +268,14 @@ class NeuralMemory(nn.Module):
         self.mlp_depth = mem.get('mlp_depth', 2)
         self.diff_view = mem.get('diff_view', False)
         self.is_look_ahead = mem.get('is_look_ahead', False)
-        self.store_memory_loss_fn = mem.get('store_memory_loss_fn', default_loss_fn)
+        # Auto-select loss function based on huber_loss_delta:
+        #   huber_loss_delta is set → use huber_loss (receives delta via loss_kwargs)
+        #   huber_loss_delta is None → use default_loss_fn (MSE)
+        huber_delta = mem.get('huber_loss_delta', None)
+        if huber_delta is not None:
+            self.store_memory_loss_fn = huber_loss
+        else:
+            self.store_memory_loss_fn = mem.get('store_memory_loss_fn', default_loss_fn)
 
         
 
