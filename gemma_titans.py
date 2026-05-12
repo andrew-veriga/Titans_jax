@@ -107,7 +107,7 @@ class TitansBlock(_modules.Block):
             features=self.embed_dim, 
             use_bias=True,
             kernel_init=flax_nn.initializers.lecun_normal(),
-            bias_init=flax_nn.initializers.constant(1.0),
+            # bias_init=flax_nn.initializers.constant(1.0),
             bias_init=flax_nn.initializers.constant(2.0),
             name='memory_gate_proj'
         )

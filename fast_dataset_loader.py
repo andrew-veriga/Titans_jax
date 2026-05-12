@@ -54,6 +54,8 @@ def get_fast_openwebtext(
     seed: int = 42,
     num_epochs: int | None = None,
     token: str | None = None,
+    cache_dir: str | None = None
+    
 ) -> kd.data.Pipeline:
     """
     Create a Kauldron dataset pipeline from pre-tokenized HuggingFace dataset.
@@ -90,4 +92,5 @@ def get_fast_openwebtext(
             _PadToLength(max_length=max_length),
             kd.data.py.Elements(keep=["tokens"]),
         ],
+        cache_dir = cache_dir
     )

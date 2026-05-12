@@ -263,19 +263,6 @@ def load_checkpoint_from_hf(
     shutil.unpack_archive(downloaded, extract_dir)
     print(f"✅ Extracted {zip_filename} → {extract_dir}")
 
-    # Also download metadata if available
-    try:
-        meta_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=f"{stem}_metadata.json",
-            repo_type=repo_type,
-            token=hf_token,
-            local_dir=local_dir,
-        )
-        print(f"📋 Metadata saved to {meta_path}")
-    except Exception:
-        pass  # metadata is optional
-
     return extract_dir
 
 
