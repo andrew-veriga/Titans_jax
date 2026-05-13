@@ -43,3 +43,5 @@ DATASET_CARD.md
 saved_titans_delta_distill_with_dotProduct2026-05-0623.zip
 
 phase2_last_metadata.json
+check_model_attn.py
+

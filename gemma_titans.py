@@ -34,6 +34,16 @@ importlib.reload(titans)
 from titans import NeuralMemory, init_memory_state, huber_loss, default_loss_fn
 
 # Monkeypatch _set_cache to support memory_state merging during prefill
+# Runtime validation: ensure the function we're patching still has the expected signature.
+import inspect as _inspect
+_sig = _inspect.signature(_cache_helper._set_cache)
+_expected_params = ['layer_data0', 'layer_data1', 'key']
+_actual_params = list(_sig.parameters.keys())
+assert _actual_params == _expected_params, (
+    f"gemma _set_cache signature changed! "
+    f"Expected {_expected_params}, got {_actual_params}. "
+    f"Monkeypatch may be incompatible — update gemma_titans.py."
+)
 # To safely handle Colab cell re-runs without recursion, check if the function is already patched.
 if not hasattr(_cache_helper._set_cache, '_is_titans_patched'):
     _orig_set_cache = _cache_helper._set_cache
@@ -221,7 +231,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
     # 23 → backward through 3 layers (~5GB compile RAM)
     # 17 → backward through 9 layers (~25GB compile RAM)
     # 11 → backward through 15 layers (~70GB compile RAM)
-    titans_phase2_first_layer: int = 23
+    titans_first_layer: int = 23
 
     @classmethod
     def from_gemma_config(
@@ -301,7 +311,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                                     else self.config.global_scale_factor,
             )
             
-            if i in self.config.titans_layer_indices and i >= self.config.titans_phase2_first_layer:
+            if i in self.config.titans_layer_indices and i >= self.config.titans_first_layer:
                 if self.config.training_phase == 1:
                         blocks.append(TitansBlock(
                         **block_kwargs,
@@ -586,7 +596,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
 
                 else:
                     # PHASE 2 / INFERENCE / EVAL: Pure Titans Memory (Student mode)
-                    if i == self.config.titans_phase2_first_layer and is_training:
+                    if i == self.config.titans_first_layer and is_training:
                         # Optimization for Phase 2 backprop
                         x = jax.lax.stop_gradient(x)
                         x_prev = jax.lax.stop_gradient(x_prev)
@@ -693,7 +703,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 dtype=dtype
             )
             
-            if i in self.config.titans_layer_indices and i >= self.config.titans_phase2_first_layer:
+            if i in self.config.titans_layer_indices and i >= self.config.titans_first_layer:
                 mem_state = init_memory_state(
                     batch_size=batch_size,
                     dim=self.config.embed_dim,

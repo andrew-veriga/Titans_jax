@@ -13,7 +13,7 @@ def main():
         Gemma3_1B_Titans.config,
         training_phase=2,
         titans_layer_indices=(23,), # Указываем, что 23 слой - это Titans
-        titans_phase2_first_layer=23,
+        titans_first_layer=23,
     )
 
     print("Создание модели Gemma3_1B_Titans...")

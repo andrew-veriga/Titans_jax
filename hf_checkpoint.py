@@ -1,11 +1,23 @@
 """
 HuggingFace Hub checkpoint utilities for Titans training.
 
-Save/load model checkpoints (zip archives) with hyperparameter metadata
-to/from a HuggingFace dataset repository.
+Phase 1 (per-layer distillation):
+    Each Titans layer is trained independently with its own config and opt_params.
+    Weights are saved as ``phase1_layer_{N}.zip``, metadata in a unified
+    ``phase1_metadata.json`` keyed by ``layer_{N}``.
+
+Phase 2 (joint LM fine-tuning):
+    Uses ``phase2_last_metadata.json`` and ``phase{phase}_from_{first_layer}_{total_steps}.zip``.
 
 Usage in notebooks:
-    from hf_checkpoint import save_checkpoint_to_hf, load_checkpoint_from_hf
+    from hf_checkpoint import (
+        save_phase1_layer_weights, load_phase1_layer_weights,
+        load_phase1_metadata, save_phase1_metadata,
+        save_phase1_last_metadata, load_phase1_last_metadata,
+        load_all_phase1_layers,
+        save_last_metadata, load_last_metadata,
+        reconstruct_opt_params, schedule,
+    )
 """
 
 import json
@@ -19,7 +31,7 @@ from huggingface_hub import HfApi, hf_hub_download, login
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-# ── Schedule serialization (Variant 1) ──────────────────────────────────
+# ── Schedule serialization ───────────────────────────────────────────────
 # optax schedules are closures (plain functions), so they cannot be
 # introspected at runtime.  Instead, notebooks store schedule **parameters**
 # as dicts with a ``"_schedule"`` key:
@@ -52,7 +64,7 @@ def schedule(name: str, **kwargs) -> dict[str, Any]:
         }
 
     This dict is JSON-serializable out of the box and can be passed directly
-    to ``save_checkpoint_to_hf(opt_params=...)``.
+    to ``save_phase1_layer_weights(opt_params=...)``.
 
     To get back a callable schedule, use ``reconstruct_schedule()`` or
     ``reconstruct_opt_params()``.
@@ -127,125 +139,171 @@ def _repo_exists(api: HfApi, repo_id: str, repo_type: str = "dataset") -> bool:
         return False
 
 
-# ── Public API ──────────────────────────────────────────────────────────
-
-def save_checkpoint_to_hf(
-    save_dir: str,
-    repo_id: str,
-    phase: int,
-    metadata: dict[str, Any] | None = None,
-    first_layer: int = 23,
-    total_steps: int = 30000,
-    experimental_config: dict[str, Any] | None = None,
-    opt_params: dict[str, Any] | None = None,
-    token: str | None = None,
-    repo_type: str = "dataset",
-) -> str:
-    """Zip a checkpoint directory and upload it to HuggingFace Hub.
-
-    Args:
-        save_dir:  Local directory with checkpoint files (e.g. ``./saved_titans_delta``).
-        repo_id:   HF dataset repo, e.g. ``"veriga/titans-checkpoints"``.
-        phase:     Training phase (1 or 2).  Used as filename prefix.
-        metadata:  Dict of hyperparameters to store alongside the checkpoint.
-        first_layer: Titans first active layer index (part of filename).
-        total_steps:  Total training steps (part of filename).
-        experimental_config: Training/experiment config dict (model arch, learning
-            rate schedule, etc.) — serialised into metadata JSON.
-        opt_params: Optimiser parameters dict (lr, weight decay, schedule, etc.)
-            — serialised into metadata JSON.
-        token:     HF API token.  Falls back to ``$HF_TOKEN`` env var.
-        repo_type: ``"dataset"`` (default) or ``"model"``.
-
-    Returns:
-        The HF filename that was uploaded (e.g. ``"phase1_from_23_30000.zip"``).
-    """
-    hf_token = token or os.environ.get("HF_TOKEN")
-    api = HfApi(token=hf_token)
-
-    # Create repo if it doesn't exist
+def _ensure_repo(api: HfApi, repo_id: str, repo_type: str = "dataset") -> None:
+    """Create the HF repo if it does not already exist."""
     if not _repo_exists(api, repo_id, repo_type):
         api.create_repo(repo_id=repo_id, repo_type=repo_type, exist_ok=True, private=True)
         print(f"📦 Created HF repo: {repo_id}")
 
-    # Build filenames
-    stem = f"phase{phase}_from_{first_layer}_{total_steps}"
-    zip_filename = f"{stem}.zip"
-    meta_filename = f"{stem}_metadata.json"
 
-    # Build full metadata — always include core training state
-    full_meta: dict[str, Any] = dict(metadata) if metadata else {}
-    full_meta["phase"] = phase
-    full_meta["first_layer"] = first_layer
-    full_meta["total_steps"] = total_steps
-    if experimental_config is not None:
-        full_meta["experimental_config"] = experimental_config
-    if opt_params is not None:
-        full_meta["opt_params"] = opt_params
+# ── Phase 1: Per-layer API ─────────────────────────────────────────────
 
-    # Zip the checkpoint directory into a temp location
+def load_phase1_metadata(
+    repo_id: str,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> dict[str, Any]:
+    """Download the unified ``phase1_metadata.json`` from HF.
+
+    Returns:
+        Parsed metadata dict keyed by ``"layer_{N}"``, or an empty dict
+        if the file does not exist yet.
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+
+    try:
+        local = hf_hub_download(
+            repo_id=repo_id,
+            filename="phase1_metadata.json",
+            repo_type=repo_type,
+            token=hf_token,
+        )
+        with open(local, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ phase1_metadata.json not found on HF: {e}")
+        return {}
+
+
+def save_phase1_metadata(
+    repo_id: str,
+    metadata: dict[str, Any],
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> str:
+    """Upload (overwrite) the unified ``phase1_metadata.json`` to HF.
+
+    Args:
+        metadata: Full metadata dict keyed by ``"layer_{N}"``.
+
+    Returns:
+        The HF filename uploaded.
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+    api = HfApi(token=hf_token)
+    _ensure_repo(api, repo_id, repo_type)
+
+    filename = "phase1_metadata.json"
     tmp_dir = tempfile.mkdtemp()
     try:
-        zip_path = shutil.make_archive(os.path.join(tmp_dir, stem), "zip", save_dir)
+        local = os.path.join(tmp_dir, filename)
+        with open(local, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, cls=_ScheduleEncoder, ensure_ascii=False)
+        api.upload_file(
+            path_or_fileobj=local,
+            path_in_repo=filename,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+        print(f"✅ Uploaded {filename} → {repo_id}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        # Write metadata JSON
-        meta_path = os.path.join(tmp_dir, meta_filename)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(full_meta, f, indent=2, cls=_ScheduleEncoder, ensure_ascii=False)
+    return filename
 
-        # Upload both files
+
+def save_phase1_layer_weights(
+    layer_num: int,
+    save_dir: str,
+    repo_id: str,
+    experimental_config: dict[str, Any] | None = None,
+    opt_params: dict[str, Any] | None = None,
+    warm_up: int = 0,
+    total_steps: int = 30000,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> str:
+    """Zip and upload weights for a **single** Titans layer, and update
+    the unified ``phase1_metadata.json``.
+
+    Args:
+        layer_num: Titans layer index (e.g. 11, 17, 23).
+        save_dir:  Local directory containing checkpoint files for this layer.
+        repo_id:   HF dataset repo.
+        experimental_config: Per-layer training config.
+        opt_params: Per-layer optimiser parameters (serialisable).
+        warm_up:   Warm-up steps for this layer.
+        total_steps: Total training steps for this layer.
+        token:     HF API token.
+        repo_type: ``"dataset"`` (default) or ``"model"``.
+
+    Returns:
+        The HF zip filename uploaded (e.g. ``"phase1_layer_23.zip"``).
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+    api = HfApi(token=hf_token)
+    _ensure_repo(api, repo_id, repo_type)
+
+    zip_filename = f"phase1_layer_{layer_num}.zip"
+
+    # ── Upload weights zip ────────────────────────────────────────────
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        zip_path = shutil.make_archive(
+            os.path.join(tmp_dir, f"phase1_layer_{layer_num}"), "zip", save_dir,
+        )
         api.upload_file(
             path_or_fileobj=zip_path,
             path_in_repo=zip_filename,
             repo_id=repo_id,
             repo_type=repo_type,
         )
-        api.upload_file(
-            path_or_fileobj=meta_path,
-            path_in_repo=meta_filename,
-            repo_id=repo_id,
-            repo_type=repo_type,
-        )
-        print(f"✅ Uploaded {zip_filename} + metadata → {repo_id}")
+        print(f"✅ Uploaded {zip_filename} → {repo_id}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # ── Update unified metadata ───────────────────────────────────────
+    layer_key = f"layer_{layer_num}"
+    metadata = load_phase1_metadata(repo_id, token=hf_token, repo_type=repo_type)
+    metadata.setdefault(layer_key, {})
+    if experimental_config is not None:
+        metadata[layer_key]["experimental_config"] = experimental_config
+    if opt_params is not None:
+        metadata[layer_key]["opt_params"] = opt_params
+    metadata[layer_key]["warm_up"] = warm_up
+    metadata[layer_key]["total_steps"] = total_steps
+
+    save_phase1_metadata(repo_id, metadata, token=hf_token, repo_type=repo_type)
 
     return zip_filename
 
 
-def load_checkpoint_from_hf(
+def load_phase1_layer_weights(
+    layer_num: int,
     repo_id: str,
-    phase: int,
-    first_layer: int,
-    total_steps: int,
     local_dir: str = ".",
     token: str | None = None,
     repo_type: str = "dataset",
 ) -> str | None:
-    """Download & unzip a checkpoint from HuggingFace Hub.
+    """Download & unzip weights for a **single** Titans layer from HF.
 
     Args:
-        repo_id:     HF dataset repo, e.g. ``"veriga/titans-checkpoints"``.
-        phase:       Training phase (1 or 2).
-        first_layer: Titans first active layer index.
-        total_steps: Total training steps.
-        local_dir:   Where to extract the checkpoint (default: cwd).
-        token:       HF API token.  Falls back to ``$HF_TOKEN`` env var.
-        repo_type:   ``"dataset"`` (default) or ``"model"``.
+        layer_num: Titans layer index.
+        repo_id:   HF dataset repo.
+        local_dir: Where to extract the checkpoint.
+        token:     HF API token.
+        repo_type: ``"dataset"`` or ``"model"``.
 
     Returns:
-        Path to the extracted directory, or ``None`` if the checkpoint
-        was not found on HF.
+        Path to the extracted directory, or ``None`` if not found.
     """
     hf_token = token or os.environ.get("HF_TOKEN")
 
-    stem = f"phase{phase}_from_{first_layer}_{total_steps}"
-    zip_filename = f"{stem}.zip"
-    extract_dir = os.path.join(local_dir, stem)
+    zip_filename = f"phase1_layer_{layer_num}.zip"
+    extract_dir = os.path.join(local_dir, f"phase1_layer_{layer_num}")
 
-    # Skip if already extracted
     if os.path.isdir(extract_dir) and os.listdir(extract_dir):
-        print(f"⏩ Checkpoint already extracted at {extract_dir}")
+        print(f"⏩ Layer {layer_num} weights already extracted at {extract_dir}")
         return extract_dir
 
     try:
@@ -256,52 +314,173 @@ def load_checkpoint_from_hf(
             token=hf_token,
         )
     except Exception as e:
-        print(f"⚠️ Checkpoint {zip_filename} not found on HF: {e}")
+        print(f"⚠️ {zip_filename} not found on HF: {e}")
         return None
 
-    # Unzip
     shutil.unpack_archive(downloaded, extract_dir)
     print(f"✅ Extracted {zip_filename} → {extract_dir}")
-
     return extract_dir
 
 
-def load_metadata_from_hf(
+def load_all_phase1_layers(
     repo_id: str,
-    phase: int,
-    first_layer: int,
-    total_steps: int,
+    titans_first_layer: int,
+    local_dir: str = ".",
     token: str | None = None,
     repo_type: str = "dataset",
 ) -> dict[str, Any] | None:
-    """Download only the metadata JSON for a checkpoint from HuggingFace Hub.
+    """Download weights for **all** trained Titans layers ≥ *titans_first_layer*.
+
+    Reads ``phase1_metadata.json`` to discover which layers have been trained,
+    downloads each ``phase1_layer_{N}.zip``, loads them via orbax, and returns
+    a merged dict ``{"layer_N": params, ...}`` suitable for
+    ``titans_tree_utils.merge_titans_params``.
+
+    Args:
+        repo_id:            HF dataset repo.
+        titans_first_layer: Minimum layer index to include.
+        local_dir:          Where to extract zips.
+        token:              HF API token.
+        repo_type:          ``"dataset"`` or ``"model"``.
+
+    Returns:
+        Combined titans params dict, or ``None`` if no layers found.
+    """
+    import orbax.checkpoint as ocp
+
+    metadata = load_phase1_metadata(repo_id, token=token, repo_type=repo_type)
+    if not metadata:
+        print("⚠️ No phase1 metadata found — cannot load layers.")
+        return None
+
+    # Determine available layers >= titans_first_layer
+    available_layers: list[int] = []
+    for key in metadata:
+        if key.startswith("layer_"):
+            try:
+                layer_idx = int(key.split("_", 1)[1])
+                if layer_idx >= titans_first_layer:
+                    available_layers.append(layer_idx)
+            except ValueError:
+                continue
+
+    if not available_layers:
+        print(f"⚠️ No trained layers ≥ {titans_first_layer} found in metadata.")
+        return None
+
+    available_layers.sort()
+    print(f"📋 Found trained layers: {available_layers}")
+
+    checkpointer = ocp.StandardCheckpointer()
+    combined: dict[str, Any] = {}
+
+    for layer_num in available_layers:
+        layer_key = f"layer_{layer_num}"
+        layer_dir = load_phase1_layer_weights(
+            layer_num, repo_id, local_dir=local_dir,
+            token=token, repo_type=repo_type,
+        )
+        if layer_dir is None:
+            print(f"⚠️ Skipping {layer_key} — weights not found.")
+            continue
+        combined[layer_key] = checkpointer.restore(os.path.abspath(layer_dir))
+        print(f"  ✅ Loaded {layer_key} weights")
+
+    if not combined:
+        return None
+
+    return combined
+
+
+# ── Phase 1: last-metadata (for resuming) ───────────────────────────────
+
+def save_phase1_last_metadata(
+    repo_id: str,
+    target_layer: int,
+    total_steps: int,
+    warm_up: int = 0,
+    experimental_config: dict[str, Any] | None = None,
+    opt_params: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> str:
+    """Upload ``phase1_last_metadata.json`` with the latest run info.
+
+    This allows notebooks to resume a Phase 1 experiment without hard-coding
+    parameters.
+
+    Returns:
+        The HF filename uploaded.
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+    api = HfApi(token=hf_token)
+    _ensure_repo(api, repo_id, repo_type)
+
+    filename = "phase1_last_metadata.json"
+    payload: dict[str, Any] = dict(extra) if extra else {}
+    payload["target_layer"] = target_layer
+    payload["total_steps"] = total_steps
+    payload["warm_up"] = warm_up
+    payload["checkpoint"] = f"phase1_layer_{target_layer}"
+    if experimental_config is not None:
+        payload["experimental_config"] = experimental_config
+    if opt_params is not None:
+        payload["opt_params"] = opt_params
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        local = os.path.join(tmp_dir, filename)
+        with open(local, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, cls=_ScheduleEncoder, ensure_ascii=False)
+        api.upload_file(
+            path_or_fileobj=local,
+            path_in_repo=filename,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+        print(f"✅ Uploaded {filename} → {repo_id}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return filename
+
+
+def load_phase1_last_metadata(
+    repo_id: str,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> dict[str, Any] | None:
+    """Download ``phase1_last_metadata.json`` from HF.
 
     Returns:
         Parsed metadata dict, or ``None`` if not found.
     """
     hf_token = token or os.environ.get("HF_TOKEN")
-    stem = f"phase{phase}_from_{first_layer}_{total_steps}"
-    meta_filename = f"{stem}_metadata.json"
+    filename = "phase1_last_metadata.json"
 
     try:
-        meta_path = hf_hub_download(
+        local = hf_hub_download(
             repo_id=repo_id,
-            filename=meta_filename,
+            filename=filename,
             repo_type=repo_type,
             token=hf_token,
         )
-        with open(meta_path, "r", encoding="utf-8") as f:
+        with open(local, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"⚠️ Metadata {meta_filename} not found on HF: {e}")
+        print(f"⚠️ {filename} not found on HF: {e}")
         return None
 
+
+# ── Phase 2: last-metadata ──────────────────────────────────────────────
 
 def save_last_metadata(
     repo_id: str,
     phase: int,
     first_layer: int,
     total_steps: int,
+    warm_up: int = 0,
     experimental_config: dict[str, Any] | None = None,
     opt_params: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
@@ -315,19 +494,18 @@ def save_last_metadata(
     ``first_layer`` / ``total_steps``.
 
     Returns:
-        The HF filename uploaded (e.g. ``"phase1_last_metadata.json"``).
+        The HF filename uploaded (e.g. ``"phase2_last_metadata.json"``).
     """
     hf_token = token or os.environ.get("HF_TOKEN")
     api = HfApi(token=hf_token)
-
-    if not _repo_exists(api, repo_id, repo_type):
-        api.create_repo(repo_id=repo_id, repo_type=repo_type, exist_ok=True, private=True)
+    _ensure_repo(api, repo_id, repo_type)
 
     filename = f"phase{phase}_last_metadata.json"
     payload: dict[str, Any] = dict(extra) if extra else {}
     payload["phase"] = phase
     payload["first_layer"] = first_layer
     payload["total_steps"] = total_steps
+    payload["warm_up"] = warm_up
     payload["checkpoint"] = f"phase{phase}_from_{first_layer}_{total_steps}"
     if experimental_config is not None:
         payload["experimental_config"] = experimental_config
@@ -380,6 +558,94 @@ def load_last_metadata(
         print(f"⚠️ {filename} not found on HF: {e}")
         return None
 
+
+# ── Phase 2: Combined checkpoint save/load ────────────────────────────────
+
+def save_checkpoint_to_hf(
+    save_dir: str,
+    repo_id: str,
+    phase: int,
+    experimental_config: dict[str, Any] | None = None,
+    opt_params: dict[str, Any] | None = None,
+    first_layer: int = 0,
+    total_steps: int = 0,
+    warm_up: int = 0,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> str:
+    """Zip a local checkpoint directory and upload it to HF.
+
+    The zip filename follows the pattern
+    ``phase{phase}_from_{first_layer}_{total_steps}.zip``.
+
+    Returns:
+        The HF zip filename uploaded.
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+    api = HfApi(token=hf_token)
+    _ensure_repo(api, repo_id, repo_type)
+
+    zip_stem = f"phase{phase}_from_{first_layer}_{total_steps}"
+    zip_filename = f"{zip_stem}.zip"
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        zip_path = shutil.make_archive(
+            os.path.join(tmp_dir, zip_stem), "zip", save_dir,
+        )
+        api.upload_file(
+            path_or_fileobj=zip_path,
+            path_in_repo=zip_filename,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+        print(f"✅ Uploaded {zip_filename} → {repo_id}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return zip_filename
+
+
+def load_checkpoint_from_hf(
+    repo_id: str,
+    phase: int,
+    first_layer: int,
+    total_steps: int,
+    local_dir: str = ".",
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> str | None:
+    """Download & unzip a phase checkpoint from HF.
+
+    Returns:
+        Path to the extracted directory, or ``None`` if not found.
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+
+    zip_filename = f"phase{phase}_from_{first_layer}_{total_steps}.zip"
+    extract_dir = os.path.join(local_dir, f"phase{phase}_from_{first_layer}_{total_steps}")
+
+    if os.path.isdir(extract_dir) and os.listdir(extract_dir):
+        print(f"⏩ Checkpoint already extracted at {extract_dir}")
+        return extract_dir
+
+    try:
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=zip_filename,
+            repo_type=repo_type,
+            token=hf_token,
+        )
+    except Exception as e:
+        print(f"⚠️ {zip_filename} not found on HF: {e}")
+        return None
+
+    shutil.unpack_archive(downloaded, extract_dir)
+    print(f"✅ Extracted {zip_filename} → {extract_dir}")
+    return extract_dir
+
+
+# ── Utility ─────────────────────────────────────────────────────────────
 
 def list_checkpoints(
     repo_id: str,
