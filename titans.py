@@ -255,7 +255,6 @@ class NeuralMemory(nn.Module):
     # is_look_ahead: bool = False
 
     def setup(self):
-        self.adaptive_step_transform = default_adaptive_step_transform
         self.pre_rmsnorm = True
         self.post_rmsnorm = True
         
@@ -268,6 +267,17 @@ class NeuralMemory(nn.Module):
         self.mlp_depth = mem.get('mlp_depth', 2)
         self.diff_view = mem.get('diff_view', False)
         self.is_look_ahead = mem.get('is_look_ahead', False)
+
+        # Adaptive LR scaling: divide max_lr by every_k_schedule so that
+        # the total memory drift per outer optimizer step remains constant
+        # regardless of gradient accumulation window size.
+        # Without this, K=8 → 8x more internal updates between outer steps →
+        # meta-gradients g₁..g₈ are computed over drifting memory weights → noisy.
+        # With scaling: drift per outer step ≈ same as K=1 → clean gradient accumulation.
+        every_k = mem.get('every_k_schedule', 1)
+        adaptive_max_lr = mem.get('adaptive_max_lr', 1e-3)
+        scaled_max_lr = adaptive_max_lr / every_k
+        self.adaptive_step_transform = partial(default_adaptive_step_transform, max_lr=scaled_max_lr)
         # Auto-select loss function based on huber_loss_delta:
         #   huber_loss_delta is set → use huber_loss (receives delta via loss_kwargs)
         #   huber_loss_delta is None → use default_loss_fn (MSE)

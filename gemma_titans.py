@@ -218,6 +218,13 @@ class Gemma_Titans_Config(_config.TransformerConfig):
             'diff_view': False,
             'is_look_ahead': False,
             'huber_loss_delta': None,
+            # Adaptive LR scaling for gradient accumulation compatibility.
+            # NeuralMemory.setup() computes: scaled_max_lr = adaptive_max_lr / every_k_schedule
+            # This keeps total memory drift per outer optimizer step constant regardless of K.
+            # At inference (no MultiSteps): memory adapts at scaled_max_lr per token — same
+            # effective rate as training, so no adjustment needed.
+            'adaptive_max_lr': 1e-3,
+            'every_k_schedule': 8,
             # store_memory_loss_fn auto-selected by NeuralMemory.setup():
             #   huber_loss_delta is not None → huber_loss
             #   huber_loss_delta is None      → default_loss_fn (MSE)
