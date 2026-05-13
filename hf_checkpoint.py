@@ -72,12 +72,109 @@ def schedule(name: str, **kwargs) -> dict[str, Any]:
     return {"_schedule": name, **kwargs}
 
 
+def _callable_to_schedule_dict(fn) -> dict[str, Any]:
+    """Introspect an optax schedule closure and convert to a serializable dict.
+
+    optax schedules are closures that capture their constructor parameters as
+    free variables.  This function extracts those variables and maps the
+    signature to a known schedule type name so that ``reconstruct_schedule()``
+    can rebuild the callable later.
+
+    Detection strategy:
+      1. Check ``__qualname__`` to identify composite schedules
+         (``join_schedules`` = ``warmup_cosine_decay_schedule``).
+      2. Check free-variable names to identify leaf schedules
+         (``polynomial_schedule``, ``cosine_decay_schedule``, ``constant``).
+
+    Supported schedules: ``warmup_cosine_decay``, ``polynomial``, ``linear``,
+    ``cosine_decay``, ``constant``.
+    """
+    if not callable(fn):
+        raise ValueError(f"Not callable: {fn!r}")
+    if not hasattr(fn, "__closure__") or fn.__closure__ is None:
+        raise ValueError(f"Not a closure: {fn!r}")
+
+    qualname = getattr(fn, "__qualname__", "")
+
+    # ── join_schedules (warmup_cosine_decay_schedule wrapper) ─────────
+    # optax.warmup_cosine_decay_schedule creates a join_schedules with:
+    #   boundaries = [warmup_steps]
+    #   schedules  = [polynomial_schedule (warmup), cosine_decay_schedule]
+    if "join_schedules" in qualname:
+        freevars = fn.__code__.co_freevars
+        values = [c.cell_contents for c in fn.__closure__]
+        params = dict(zip(freevars, values))
+        boundaries = params["boundaries"]
+        inner_schedules = params["schedules"]
+        if len(inner_schedules) == 2 and len(boundaries) == 1:
+            warmup_fn = inner_schedules[0]
+            cosine_fn = inner_schedules[1]
+            w_freevars = warmup_fn.__code__.co_freevars
+            w_values = [c.cell_contents for c in warmup_fn.__closure__]
+            w_params = dict(zip(w_freevars, w_values))
+            c_freevars = cosine_fn.__code__.co_freevars
+            c_values = [c.cell_contents for c in cosine_fn.__closure__]
+            c_params = dict(zip(c_freevars, c_values))
+            # Reverse-engineer optax.warmup_cosine_decay_schedule params:
+            # optax internally creates cosine_decay_schedule(decay_steps - warmup_steps),
+            # so we must add warmup_steps back to get the original decay_steps.
+            init_value = w_params["init_value"]
+            peak_value = w_params["end_value"]
+            warmup_steps = w_params["transition_steps"]
+            decay_steps = c_params["decay_steps"] + warmup_steps
+            alpha = c_params["alpha"]
+            end_value = peak_value * alpha
+            return {
+                "_schedule": "warmup_cosine_decay",
+                "init_value": init_value,
+                "peak_value": peak_value,
+                "warmup_steps": warmup_steps,
+                "decay_steps": decay_steps,
+                "end_value": end_value,
+            }
+        raise ValueError(f"Unsupported join_schedules structure: {params}")
+
+    freevars = fn.__code__.co_freevars
+    values = [c.cell_contents for c in fn.__closure__]
+    params = dict(zip(freevars, values))
+    param_keys = set(params.keys())
+
+    # ── cosine_decay_schedule (alpha/exponent variant) ───────────────
+    if "cosine_decay_schedule" in qualname:
+        return {"_schedule": "cosine_decay", **params}
+
+    # ── polynomial_schedule (used internally by linear_schedule) ─────
+    if "polynomial_schedule" in qualname:
+        return {"_schedule": "polynomial", **params}
+
+    # ── constant_schedule ────────────────────────────────────────────
+    if param_keys == {"value"}:
+        return {"_schedule": "constant", **params}
+
+    raise ValueError(
+        f"Unknown schedule: qualname={qualname!r}, freevars={param_keys}"
+    )
+
+
 class _ScheduleEncoder(json.JSONEncoder):
-    """JSON encoder that handles numpy/JAX scalars and falls back to repr."""
+    """JSON encoder that handles numpy/JAX scalars and optax schedule callables.
+
+    Callable values that look like optax schedules (closures with known
+    parameter signatures) are automatically converted to serializable
+    ``schedule()`` dicts with a ``"_schedule"`` key.
+    """
 
     def default(self, obj: Any) -> Any:
+        # numpy / JAX scalars
         if hasattr(obj, "item"):
             return obj.item()
+        # optax schedule callables
+        if callable(obj):
+            try:
+                return _callable_to_schedule_dict(obj)
+            except (ValueError, AttributeError):
+                pass
+        # Fallback
         try:
             return repr(obj)
         except Exception:
