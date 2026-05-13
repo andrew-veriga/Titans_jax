@@ -576,7 +576,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                      # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
-                    layer_loss = self.cos_by_softmax(delta_teacher, delta_student)
+                    layer_loss = self.cos_by_softmax(delta_teacher, delta_student)  # (B, L)
+                    # Маскируем паддинг-позиции нулями
+                    layer_loss = layer_loss * inputs.inputs_mask.astype(layer_loss.dtype)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
                     
                     
@@ -631,18 +633,21 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         x = self.final_norm(x)
         
         # Add total distillation loss to satisfy Kauldron trainer expectations in Phase 1
+        # loss_layer_* имеют форму (B, L) с нулями на паддинг-позициях
         if self.config.training_phase == 1 and is_training:
-            total_distill = jnp.zeros((), dtype=jnp.bfloat16)
+            mask_float = inputs.inputs_mask.astype(jnp.float32)              # (B, L)
+            mask_count = jnp.maximum(mask_float.sum(axis=-1), 1.0)          # (B,)
+            total_distill = jnp.zeros((x.shape[0],), dtype=jnp.float32)     # (B,)
             count = 0
             for k, v in layer_losses.items():
                 if k.startswith("loss_layer_"):
-                    total_distill += jnp.mean(v)
+                    # v: (B, L) с нулями на паддинге → sum по L / кол-во реальных токенов
+                    total_distill = total_distill + v.astype(jnp.float32).sum(axis=-1) / mask_count
                     count += 1
             if count > 0:
-                # Транслируем скалярный лосс на размер батча, чтобы декоратор мог его развернуть
-                layer_losses['lm_loss'] = jnp.broadcast_to(total_distill / count, (x.shape[0],))
+                layer_losses['lm_loss'] = total_distill / count             # (B,)
             else:
-                layer_losses['lm_loss'] = jnp.zeros((x.shape[0],), dtype=jnp.bfloat16)
+                layer_losses['lm_loss'] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
 
         return x, new_cache, layer_losses
 
@@ -657,10 +662,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         nll = -jax.lax.dot_general(
                         dt_prob, ds_log,
                         (((2,), (2,)), ((0, 1), (0, 1)))
-                    ) 
+                    )  # (B, L)
                     
-        layer_loss = nll.mean(axis=-1)
-        return layer_loss
+        return nll  # Без .mean(axis=-1): маскирование паддинга делается в _apply_attention
     
     def normalized_mse(self, delta_teacher, delta_student):
         """

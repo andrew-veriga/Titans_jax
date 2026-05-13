@@ -22,7 +22,7 @@ from kauldron import kd
 
 
 class _PadToLength(grain.MapTransform):
-    """Pad variable-length input_ids to fixed max_length and rename to 'tokens'."""
+    """Pad variable-length input_ids to fixed max_length and create input_mask."""
 
     def __init__(self, max_length: int = 1024):
         self.max_length = max_length
@@ -31,11 +31,15 @@ class _PadToLength(grain.MapTransform):
         tokens = element["input_ids"]
         if isinstance(tokens, list):
             tokens = np.array(tokens, dtype=np.int32)
+        original_len = min(len(tokens), self.max_length)
         tokens = tokens[: self.max_length]
         pad_len = self.max_length - len(tokens)
         if pad_len > 0:
             tokens = np.pad(tokens, (0, pad_len), constant_values=0)
-        return {"tokens": tokens}
+        # Маска: 1 для реальных токенов, 0 для паддинга
+        input_mask = np.zeros(self.max_length, dtype=np.int32)
+        input_mask[:original_len] = 1
+        return {"tokens": tokens, "input_mask": input_mask}
 
 
 class _KeepTokens(grain.MapTransform):
@@ -90,7 +94,7 @@ def get_fast_openwebtext(
         batch_size=batch_size,
         transforms=[
             _PadToLength(max_length=max_length),
-            kd.data.py.Elements(keep=["tokens"]),
+            kd.data.py.Elements(keep=["tokens", "input_mask"]),
         ],
         cache_dir = cache_dir
     )
