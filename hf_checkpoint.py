@@ -943,8 +943,11 @@ def read_tensorboard_losses(
         if tag in t:
             matched_tag = t
             break
-    if matched_tag is None and available:
-        print(f"⚠️ Tag '{tag}' not found. Available: {available[:10]}")
+    if matched_tag is None:
+        if available:
+            print(f"⚠️ Tag '{tag}' not found. Available tags: {available[:10]}")
+        else:
+            print(f"⚠️ No scalar tags found in {summaries_dir}")
         return []
 
     events = ea.Scalars(matched_tag)
