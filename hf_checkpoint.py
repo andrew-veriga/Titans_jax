@@ -742,6 +742,215 @@ def load_checkpoint_from_hf(
     return extract_dir
 
 
+# ── Training Reports ────────────────────────────────────────────────────
+
+def save_training_report(
+    repo_id: str,
+    phase: int,
+    first_layer: int,
+    total_steps: int,
+    loss_history: list[dict[str, Any]],
+    extra_metrics: dict[str, Any] | None = None,
+    experimental_config: dict[str, Any] | None = None,
+    opt_params: dict[str, Any] | None = None,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> str:
+    """Upload a training report (JSON + loss plot PNG) to HF.
+
+    The report ties training results to the hyperparameters that produced them.
+
+    Args:
+        repo_id: HF dataset repo.
+        phase: Training phase (1 or 2).
+        first_layer: First Titans layer index.
+        total_steps: Total training steps completed.
+        loss_history: List of ``{"step": int, "value": float}`` dicts.
+        extra_metrics: Dict of extra metrics (e.g. last 500 avg loss, accuracy).
+        experimental_config: Model config used.
+        opt_params: Optimizer params used.
+        token: HF API token.
+        repo_type: ``"dataset"`` or ``"model"``.
+
+    Returns:
+        The report filename uploaded (e.g. ``"phase2_report_from_11_60000.json"``).
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+    api = HfApi(token=hf_token)
+    _ensure_repo(api, repo_id, repo_type)
+
+    stem = f"phase{phase}_report_from_{first_layer}_{total_steps}"
+
+    # ── Compute loss statistics ──────────────────────────────────────
+    import numpy as _np
+
+    if loss_history:
+        values = [e["value"] for e in loss_history]
+        steps = [e["step"] for e in loss_history]
+        stats = {
+            "loss_min": float(min(values)),
+            "loss_max": float(max(values)),
+            "loss_final": float(values[-1]),
+            "loss_mean": float(_np.mean(values)),
+            "loss_std": float(_np.std(values)),
+        }
+        # Last N steps average
+        for n in (100, 500, 1000):
+            if len(values) >= n:
+                stats[f"loss_last_{n}_mean"] = float(_np.mean(values[-n:]))
+    else:
+        stats = {}
+
+    # ── Build JSON report ────────────────────────────────────────────
+    report: dict[str, Any] = {
+        "phase": phase,
+        "first_layer": first_layer,
+        "total_steps": total_steps,
+        "checkpoint": f"phase{phase}_from_{first_layer}_{total_steps}",
+        "loss_stats": stats,
+        "loss_history_sample": loss_history,  # full history or sampled
+    }
+    if extra_metrics:
+        report["extra_metrics"] = extra_metrics
+    if experimental_config:
+        report["experimental_config"] = experimental_config
+    if opt_params:
+        report["opt_params"] = opt_params
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        # ── Upload JSON report ───────────────────────────────────────
+        json_filename = f"{stem}.json"
+        json_path = os.path.join(tmp_dir, json_filename)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, cls=_ScheduleEncoder, ensure_ascii=False)
+        api.upload_file(
+            path_or_fileobj=json_path,
+            path_in_repo=json_filename,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
+        print(f"✅ Uploaded {json_filename} → {repo_id}")
+
+        # ── Upload loss plot PNG ─────────────────────────────────────
+        if loss_history:
+            try:
+                import matplotlib
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+
+                fig, ax = plt.subplots(figsize=(12, 5))
+                ax.plot(steps, values, linewidth=0.5, alpha=0.7, label="loss")
+                if "loss_last_500_mean" in stats:
+                    last_500_avg = stats["loss_last_500_mean"]
+                    ax.axhline(
+                        y=last_500_avg, color="r", linestyle="--",
+                        label=f"last 500 avg: {last_500_avg:.4f}",
+                    )
+                ax.set_xlabel("Step")
+                ax.set_ylabel("Loss")
+                ax.set_title(
+                    f"Phase {phase} Loss (layers ≥{first_layer}, {total_steps} steps)"
+                )
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                fig.tight_layout()
+
+                png_filename = f"{stem}.png"
+                png_path = os.path.join(tmp_dir, png_filename)
+                fig.savefig(png_path, dpi=150)
+                plt.close(fig)
+
+                api.upload_file(
+                    path_or_fileobj=png_path,
+                    path_in_repo=png_filename,
+                    repo_id=repo_id,
+                    repo_type=repo_type,
+                )
+                print(f"✅ Uploaded {png_filename} → {repo_id}")
+            except ImportError:
+                print("⚠️ matplotlib not available — skipping loss plot upload")
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return stem
+
+
+def load_training_report(
+    repo_id: str,
+    phase: int,
+    first_layer: int,
+    total_steps: int,
+    token: str | None = None,
+    repo_type: str = "dataset",
+) -> dict[str, Any] | None:
+    """Download a training report JSON from HF.
+
+    Returns:
+        Parsed report dict, or ``None`` if not found.
+    """
+    hf_token = token or os.environ.get("HF_TOKEN")
+    filename = f"phase{phase}_report_from_{first_layer}_{total_steps}.json"
+
+    try:
+        local = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            repo_type=repo_type,
+            token=hf_token,
+        )
+        with open(local, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ {filename} not found on HF: {e}")
+        return None
+
+
+def read_tensorboard_losses(
+    workdir: str,
+    tag: str = "lm_loss",
+) -> list[dict[str, Any]]:
+    """Read loss values from TensorBoard event files in a Kauldron workdir.
+
+    Args:
+        workdir: Path to the Kauldron workdir (e.g. ``titans_workdir_phase2_from11``).
+        tag: The TensorBoard tag to read (default ``"lm_loss"``).
+
+    Returns:
+        List of ``{"step": int, "value": float}`` sorted by step.
+    """
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import (
+            EventAccumulator,
+        )
+    except ImportError:
+        print("⚠️ tensorboard not installed — cannot read event files")
+        return []
+
+    summaries_dir = os.path.join(workdir, "summaries")
+    if not os.path.isdir(summaries_dir):
+        # Try top-level workdir
+        summaries_dir = workdir
+
+    ea = EventAccumulator(summaries_dir)
+    ea.Reload()
+
+    # Find the tag (Kauldron may prefix it)
+    available = ea.Tags().get("scalars", [])
+    matched_tag = None
+    for t in available:
+        if tag in t:
+            matched_tag = t
+            break
+    if matched_tag is None and available:
+        print(f"⚠️ Tag '{tag}' not found. Available: {available[:10]}")
+        return []
+
+    events = ea.Scalars(matched_tag)
+    return [{"step": e.step, "value": e.value} for e in events]
+
+
 # ── Utility ─────────────────────────────────────────────────────────────
 
 def list_checkpoints(
