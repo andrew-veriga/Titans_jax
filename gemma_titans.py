@@ -592,7 +592,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     # После student pass:
                     if layer_cache_student is not None and 'gate_values' in layer_cache_student:
                         layer_losses[f"gate_{layer_name}"] = layer_cache_student['gate_values']
-
+                    else layer_losses[f"gate_{layer_name}"] = {}
                     
                     # 4. Teacher Chain: Update x with Teacher's output to prevent Exposure Bias
                     x_prev = x
