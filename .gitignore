@@ -45,3 +45,8 @@ saved_titans_delta_distill_with_dotProduct2026-05-0623.zip
 phase2_last_metadata.json
 check_model_attn.py
 
+ssh_run.py
+server_sse_fixed.mjs
+server_sse_v3.mjs
+Titans_MCP_Setup_Guide.md
+.gemini/settings.json

@@ -1,5 +1,10 @@
 """
-Titans Memory optimizer with 3-way routing: Muon / Adam-atan2 for gates / Adam-atan2 for base.
+Titans Memory optimizer with M3 routing:
+  m3_optimizer for projections / Adam-atan2 for gates / Adam-atan2 for base.
+
+M3 (Multi-scale Momentum) replaces Muon, adding slow momentum that updates
+every `slow_update_freq` steps, aggregated via Newton-Schulz normalization.
+This prevents optimizer catastrophic forgetting on heterogeneous chunks.
 
 Usage:
     from routing_optimizer import make_routing_optimizer
@@ -8,7 +13,9 @@ Usage:
 
 where opt_params is a dict with keys:
     lr_muon, beta, lr_adam, adam_b1, adam_b2,
-    lr_gate, gate_b1, gate_b2, every_k_schedule
+    lr_gate, gate_b1, gate_b2, every_k_schedule,
+    slow_update_freq (optional, default 16),
+    slow_weight (optional, default 0.1)
 """
 
 import jax
@@ -16,40 +23,28 @@ import jax.numpy as jnp
 import optax
 from kauldron import kd
 from adam_atan2 import adam_atan2
-from optax.contrib._muon import MuonDimensionNumbers
+from m3_optimizer import m3_optimizer
 
 
 # ── mask helpers ─────────────────────────────────────────────────────────────
 
-MUON_KEYS = {"to_queries", "to_keys_values", "combine_heads"}
+M3_KEYS = {"to_queries", "to_keys_values", "combine_heads"}
 
 
-def muon_only_dims(params):
-    """Return MuonDimensionNumbers for attention projection kernels."""
-
-    def _label(path, v):
-        key = str(path[-1].key) if hasattr(path[-1], "key") else ""
-        parent = str(path[-2].key) if len(path) > 1 and hasattr(path[-2], "key") else ""
-        if key == "kernel" and parent in MUON_KEYS:
-            return MuonDimensionNumbers(reduction_axis=0, output_axis=1)
-        return None
-
-    return jax.tree_util.tree_map_with_path(_label, params)
-
-
-def is_muon_param(path_str: str) -> bool:
+def is_m3_param(path_str: str) -> bool:
+    """True for attention projection kernels (routed to M3 optimizer)."""
     parts = path_str.split("/")
     return (
         len(parts) >= 2
         and parts[-1] == "kernel"
-        and parts[-2] in MUON_KEYS
+        and parts[-2] in M3_KEYS
     )
 
 
-def muon_mask(params):
+def m3_mask(params):
+    """Mask for parameters that use M3 optimizer (attention projections)."""
     def _m(path, v):
-        return is_muon_param("/".join(str(p.key) for p in path))
-
+        return is_m3_param("/".join(str(p.key) for p in path))
     return jax.tree_util.tree_map_with_path(_m, params)
 
 
@@ -60,15 +55,13 @@ def is_gate_param(path_str: str) -> bool:
 def gate_mask(params):
     def _m(path, v):
         return is_gate_param("/".join(str(p.key) for p in path))
-
     return jax.tree_util.tree_map_with_path(_m, params)
 
 
 def adam_base_mask(params):
     def _m(path, v):
         path_str = "/".join(str(p.key) for p in path)
-        return not is_muon_param(path_str) and not is_gate_param(path_str)
-
+        return not is_m3_param(path_str) and not is_gate_param(path_str)
     return jax.tree_util.tree_map_with_path(_m, params)
 
 
@@ -78,10 +71,16 @@ def adam_base_mask(params):
 def make_routing_optimizer(opt_params: dict):
     """Build a 3-way routed optimizer wrapped in ``partial_updates`` + ``MultiSteps``.
 
+    Routing:
+        1. **M3 optimizer** (multi-scale momentum + Newton-Schulz) for attention
+           projection kernels: to_queries, to_keys_values, combine_heads.
+        2. **Adam-atan2** for memory gate parameters (memory_gate_proj).
+        3. **Adam-atan2** for remaining memory parameters.
+
     Args:
         opt_params: dict with keys
-            lr_muon           – learning-rate schedule or float for Muon (attention projections)
-            beta              – Muon momentum beta
+            lr_muon           – learning-rate schedule or float for M3 (attention projections)
+            beta              – M3 fast momentum beta
             lr_adam           – learning-rate schedule or float for Adam (base memory params)
             adam_b1           – Adam b1 schedule or float (base)
             adam_b2           – Adam b2 float (base)
@@ -89,22 +88,29 @@ def make_routing_optimizer(opt_params: dict):
             gate_b1           – Adam b1 schedule or float (gate)
             gate_b2           – Adam b2 float (gate)
             every_k_schedule  – int, gradient accumulation / update frequency
+            slow_update_freq  – int, M3 slow momentum update frequency (default 16)
+            slow_weight       – float, M3 slow momentum weight (default 0.1)
 
     Returns:
         An ``optax.GradientTransformation`` ready to pass to ``kd.train.Trainer``.
     """
+    slow_freq = opt_params.get("slow_update_freq", 16)
+    slow_wt = opt_params.get("slow_weight", 0.1)
+
     inner_chain = optax.chain(
         optax.clip_by_global_norm(1.0),
-        # 1. Muon for attention projections
+        # 1. M3 for attention projections (replaces Muon)
         optax.masked(
-            optax.contrib.muon(
+            m3_optimizer(
                 learning_rate=opt_params["lr_muon"],
-                muon_weight_dimension_numbers=muon_only_dims,
-                beta=opt_params["beta"],
+                beta_fast=opt_params["beta"],
+                beta_slow=0.99,
+                slow_update_freq=slow_freq,
+                slow_weight=slow_wt,
                 eps=1e-8,
                 mu_dtype=jnp.float32,
             ),
-            mask=muon_mask,
+            mask=m3_mask,
         ),
         # 2. Adam-atan2 for memory gates (higher LR)
         optax.masked(

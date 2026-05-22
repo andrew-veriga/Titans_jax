@@ -199,6 +199,7 @@ class TitansBlock(_modules.Block):
             new_cache = dict(new_attn_cache)
             new_cache['memory_state'] = next_mem_state
             new_cache['avg_mem_loss'] = avg_mem_loss  # Store memory loss metric in cache
+            new_cache['gate_values'] = gate  # [B, L, embed_dim]
         else:
             new_cache = None
 
@@ -588,6 +589,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     layer_loss = layer_loss * inputs.inputs_mask.astype(layer_loss.dtype)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
                     
+                    # После student pass:
+                    if layer_cache_student is not None and 'gate_values' in layer_cache_student:
+                        layer_losses[f"gate_{layer_name}"] = layer_cache_student['gate_values']
+
                     
                     # 4. Teacher Chain: Update x with Teacher's output to prevent Exposure Bias
                     x_prev = x
