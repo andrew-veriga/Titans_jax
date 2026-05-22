@@ -459,7 +459,10 @@ class NeuralMemory(nn.Module):
                 init=None,
                 xs=(keys, adaptive_lr_chunked, values)
             )
-        avg_mem_loss = jnp.mean(mem_losses) 
+        # mem_losses has shape (num_chunks, batch * heads)
+        # Aggregate to (batch,) for per-sample logging metrics
+        avg_mem_loss = rearrange(mem_losses, 'n (b h) -> n b h', b=batch, h=self.heads)
+        avg_mem_loss = jnp.mean(avg_mem_loss, axis=(0, 2)) 
         
         # scalar
         # restore to (b h n) ... so subsequent code remains unchanged

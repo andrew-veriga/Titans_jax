@@ -580,6 +580,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     # 2b. Log memory MSE loss (from student's memory update)
                     if layer_cache_student is not None and 'avg_mem_loss' in layer_cache_student:
                         layer_losses[f"mem_loss_{layer_name}"] = layer_cache_student['avg_mem_loss']
+                    else:
+                        layer_losses[f"mem_loss_{layer_name}"] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
 
                      # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
@@ -590,7 +592,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
                     
                     # После student pass:
-                    if layer_cache_student is not None and 'gate_vwhy do yoalues' in layer_cache_student:
+                    if layer_cache_student is not None and 'gate_values' in layer_cache_student:
                         layer_losses[f"gate_{layer_name}"] = layer_cache_student['gate_values']
                     else:
                         layer_losses[f"gate_{layer_name}"] = jnp.zeros_like(x)
