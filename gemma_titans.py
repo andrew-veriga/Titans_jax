@@ -198,7 +198,7 @@ class TitansBlock(_modules.Block):
         # Construct new cache - ALWAYS return a dict to preserve metrics (gate, loss)
         # even if input cache was None. Gemma3_1B_Titans._forward handles the 
         # external 'None' return if needed.
-        new_cache = dict(new_attn_cache)
+        new_cache = dict(new_attn_cache or {})
         new_cache['memory_state'] = next_mem_state
         new_cache['avg_mem_loss'] = avg_mem_loss  # Store memory loss metric in cache
         new_cache['gate_values'] = gate  # [B, L, embed_dim]
