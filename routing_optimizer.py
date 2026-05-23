@@ -96,6 +96,20 @@ def make_routing_optimizer(opt_params: dict):
     """
     slow_freq = opt_params.get("slow_update_freq", 16)
     slow_wt = opt_params.get("slow_weight", 0.1)
+    every_k = opt_params["every_k_schedule"]
+
+    # CMS principle: slow momentum must update at most as often as the optimizer
+    # steps.  M3 counts in optimizer steps (inside MultiSteps), so slow_update_freq
+    # must be >= every_k_schedule.  Auto-correct with a warning if violated.
+    if slow_freq < every_k:
+        import warnings
+        warnings.warn(
+            f"routing_optimizer: slow_update_freq ({slow_freq}) < "
+            f"every_k_schedule ({every_k}).  "
+            f"Auto-correcting slow_update_freq to {every_k}.",
+            stacklevel=2,
+        )
+        slow_freq = every_k
 
     inner_chain = optax.chain(
         optax.clip_by_global_norm(1.0),
