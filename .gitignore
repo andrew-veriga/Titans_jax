@@ -29,7 +29,7 @@ colabs/train_gemma_generated.array_record
 colabs/gemma3_1b_it_params.pkl.orbax-checkpoint-tmp
 
 
-./Titans_jax_Phase2_LM.ipynb
+
 docs/Titans_delta_METADATA
 docs/work_dir_METADATA
 docs/_METADATA (1)
@@ -50,3 +50,7 @@ server_sse_fixed.mjs
 server_sse_v3.mjs
 Titans_MCP_Setup_Guide.md
 .gemini/settings.json
+
+activations_layer23
+gemma3_1b_ckpt
+phase1_layer_23

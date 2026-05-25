@@ -275,6 +275,7 @@ def main():
             text = text.decode("utf-8")
         # Tokenize with BOS token, truncate to max_length
         tokens = tokenizer.encode(text, add_bos=True)[:args.max_length]
+        tokens = [int(t) for t in tokens]
         return {"input_ids": tokens, "length": len(tokens)}
 
     # Tokenize (removes 'text' column to save space)

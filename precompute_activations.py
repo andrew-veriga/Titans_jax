@@ -13,7 +13,7 @@ tiny — only TitansBlock + head — and fits easily in HBM.
 Usage:
     # Basic — precompute for dataset of 1024-token sequences
     python precompute_activations.py \
-        --gemma_ckpt /path/to/gemma-3-1b-pt \
+        # --gemma_ckpt /path/to/gemma-3-1b-pt \
         --dataset_repo veriga/openwebtext-gemma3-tokenized-1024 \
         --output_dir ./activations_layer23 \
         --target_layer 23 \
@@ -22,14 +22,14 @@ Usage:
 
     # Resume interrupted run
     python precompute_activations.py \
-        --gemma_ckpt /path/to/gemma-3-1b-pt \
+        # --gemma_ckpt /path/to/gemma-3-1b-pt \
         --dataset_repo veriga/openwebtext-gemma3-tokenized-1024 \
         --output_dir ./activations_layer23 \
         --resume
 
     # Use local tokenized dataset
     python precompute_activations.py \
-        --gemma_ckpt /path/to/gemma-3-1b-pt \
+        # --gemma_ckpt /path/to/gemma-3-1b-pt \
         --local_dataset ./tokenized_openwebtext \
         --output_dir ./activations_layer23
 
@@ -40,13 +40,18 @@ Usage:
 
 Output structure:
     activations_layer23/
-    ├── shard_000000.npy   # shape (N, seq_len, 1152), dtype float32
+    ├── shard_000000.npy          # shape (N, seq_len, 1152), dtype bfloat16
+    ├── shard_000000_tokens.npy   # shape (N, seq_len), dtype int32 — original token IDs (for CE loss)
+    ├── shard_000000_masks.npy    # shape (N, seq_len), dtype int32 — 1 for real tokens
     ├── shard_000001.npy
+    ├── shard_000001_tokens.npy
+    ├── shard_000001_masks.npy
     ├── ...
-    └── metadata.json      # config used, shard sizes, etc.
+    └── metadata.json             # config used, shard sizes, etc.
 
 Each .npy shard contains `batch_size` examples.
-Shard size = batch_size × seq_len × 1152 × 4 bytes ≈ 36 MB per shard (bs=8, len=1024).
+Shard size = batch_size × seq_len × 1152 × 2 bytes ≈ 18 MB per shard (bs=8, len=1024, bfloat16).
+Token shard = batch_size × seq_len × 4 bytes ≈ 32 KB per shard (negligible overhead).
 """
 
 import argparse
@@ -54,6 +59,8 @@ import json
 import os
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +68,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import orbax.checkpoint as ocp
+checkpointer = ocp.StandardCheckpointer()
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -70,8 +79,10 @@ def parse_args():
     p.add_argument(
         "--gemma_ckpt",
         type=str,
-        required=True,
-        help="Path to official Gemma-3-1B checkpoint directory",
+        default="./gemma3_1b_ckpt/gemma3-1b-it",
+        help="Path to local Gemma-3-1B checkpoint directory. "
+             "Default: ./gemma3_1b_ckpt/gemma3-1b-it (downloaded via gsutil). "
+             "Download with: gsutil -m cp -r gs://gemma-data/checkpoints/gemma3-1b-it ./gemma3_1b_ckpt",
     )
 
     # --- Dataset source (mutually exclusive) ---
@@ -128,9 +139,9 @@ def parse_args():
     p.add_argument(
         "--save_dtype",
         type=str,
-        default="float32",
+        default="bfloat16",
         choices=["float32", "bfloat16", "float16"],
-        help="Dtype for saved activations (default: float32 — safer for training)",
+        help="Dtype for saved activations (default: bfloat16 — matches model output dtype)",
     )
 
     # --- Limits ---
@@ -148,10 +159,103 @@ def parse_args():
         help="Resume from last completed shard in output_dir",
     )
 
+    # --- HF upload ---
+    p.add_argument(
+        "--push_activations",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Push shards to HuggingFace Hub asynchronously (default: false)",
+    )
+    p.add_argument(
+        "--activations_repo",
+        type=str,
+        default=None,
+        help="HF repo for activations, e.g. 'user/activations-layer23' "
+             "(default: same as --dataset_repo with '-activations-layer{N}' suffix)",
+    )
+    p.add_argument(
+        "--upload_workers",
+        type=int,
+        default=2,
+        help="Number of background upload threads (default: 2)",
+    )
+    p.add_argument(
+        "--upload_batch",
+        type=int,
+        default=64,
+        help="Number of shards per HF commit (default: 64)",
+    )
+    p.add_argument(
+        "--upload_retries",
+        type=int,
+        default=3,
+        help="Retry attempts per upload commit (default: 3)",
+    )
+    p.add_argument(
+        "--upload_private",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Make HF activations repo private (default: true)",
+    )
+
     # --- HF token ---
     p.add_argument("--hf_token", type=str, default=None, help="HuggingFace API token")
 
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Async HuggingFace upload
+# ---------------------------------------------------------------------------
+
+_upload_lock = threading.Lock()
+_upload_stats = {"uploaded": 0, "failed": 0}
+
+
+def upload_shard_batch(shard_paths, repo_id, token, private, max_retries=3):
+    """Upload a batch of shard files as a single HF commit (with retry)."""
+    from huggingface_hub import CommitOperationAdd, create_commit, create_repo
+
+    operations = [
+        CommitOperationAdd(
+            path_in_repo=os.path.basename(p),
+            path_or_fileobj=p,
+        )
+        for p in shard_paths
+    ]
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            create_commit(
+                repo_id=repo_id,
+                operations=operations,
+                commit_message=f"Add {len(shard_paths)} shards ({os.path.basename(shard_paths[0])}..{os.path.basename(shard_paths[-1])})",
+                token=token,
+                private=private,
+                repo_type="dataset",
+                create_pr=False,
+            )
+            with _upload_lock:
+                _upload_stats["uploaded"] += len(shard_paths)
+                uploaded = _upload_stats["uploaded"]
+                failed = _upload_stats["failed"]
+            print(f"  ⬆️  Uploaded {len(shard_paths)} shards to HF "
+                  f"(total: {uploaded} uploaded, {failed} failed)", flush=True)
+            return True
+        except Exception as e:
+            wait = 10 * (2 ** (attempt - 1))
+            print(f"  ❌ Upload failed (attempt {attempt}/{max_retries}): "
+                  f"{type(e).__name__}: {e}", flush=True)
+            if attempt < max_retries:
+                time.sleep(wait)
+
+    with _upload_lock:
+        _upload_stats["failed"] += len(shard_paths)
+    print(f"  💎 Upload gave up after {max_retries} attempts for "
+          f"{shard_paths[0]}..{shard_paths[-1]}", flush=True)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +362,7 @@ def load_tokenized_dataset(
     else:
         from datasets import load_dataset
         token = hf_token or os.environ.get("HF_TOKEN")
-        ds = load_dataset(repo_id, split="train", token=token)
+        ds = load_dataset(repo_id, split="train", token=token, revision='8aee434c5ab4')
         print(f"📂 Loaded HF dataset: {len(ds):,} examples from {repo_id}")
 
     return ds
@@ -321,13 +425,20 @@ def main():
     # --- Load Gemma ---
     print("🔧 Loading Gemma-3-1B model and parameters...")
     from gemma import gm
-    
-    params = gm.ckpts.load_params(args.gemma_ckpt)
-    # Convert to compute dtype
-    params = jax.tree_util.tree_map(
-        lambda x: x.astype(compute_dtype) if hasattr(x, 'astype') else x,
-        params
-    )
+
+    if args.gemma_ckpt is not None:
+        ckpt_path = os.path.abspath(args.gemma_ckpt)
+        print(f"   Loading from local path: {ckpt_path}")
+    else:
+        ckpt_path = gm.ckpts.CheckpointPath.GEMMA3_1B_IT
+        print(f"   Loading from GCS: {ckpt_path}")
+        print("   (If this fails, download the model and use --gemma_ckpt)")
+    params = gm.ckpts.load_params(ckpt_path)
+    # # Convert to compute dtype
+    # params = jax.tree_util.tree_map(
+    #     lambda x: x.astype(compute_dtype) if hasattr(x, 'astype') else x,
+    #     params
+    # )
     print(f"   Parameters loaded, dtype={args.dtype}")
 
     # --- Build forward function ---
@@ -366,6 +477,75 @@ def main():
         else:
             print("📋 No metadata found, starting from scratch")
 
+    # --- Setup async upload ---
+    do_push = args.push_activations == "true"
+    executor = None
+    pending_shards = []  # shard paths waiting to be uploaded
+    upload_futures = []  # futures for in-flight uploads
+
+    if do_push:
+        # Resolve repo name
+        if args.activations_repo:
+            act_repo = args.activations_repo
+        elif args.dataset_repo:
+            # Derive from dataset repo: "user/dataset" → "user/dataset-activations-layer23"
+            act_repo = f"{args.dataset_repo}-activations-layer{args.target_layer}"
+        else:
+            act_repo = f"activations-layer{args.target_layer}"
+            print(f"⚠️  No --activations_repo and no --dataset_repo, using '{act_repo}'")
+
+        # Safety: prevent uploading activations into the token dataset repo
+        if args.dataset_repo and act_repo == args.dataset_repo:
+            raise ValueError(
+                f"❌ Refusing to upload activations into the token dataset repo "
+                f"'{act_repo}'. Activations must go to a SEPARATE repo. "
+                f"Use --activations_repo to specify a different repo, or omit it "
+                f"to use the default '{args.dataset_repo}-activations-layer{args.target_layer}'."
+            )
+
+        # Resolve token
+        hf_token = args.hf_token or os.environ.get("HF_TOKEN")
+        if not hf_token:
+            print("⚠️  No HF token for upload. Set --hf_token or HF_TOKEN env var.")
+            do_push = False
+        else:
+            # Create repo if needed
+            from huggingface_hub import create_repo, HfApi
+            api = HfApi(token=hf_token)
+            try:
+                create_repo(
+                    act_repo,
+                    token=hf_token,
+                    private=args.upload_private == "true",
+                    repo_type="dataset",
+                    exist_ok=True,
+                )
+                print(f"📡 HF upload repo: https://huggingface.co/datasets/{act_repo}")
+            except Exception as e:
+                print(f"⚠️  Could not create HF repo: {e}")
+                do_push = False
+
+        if do_push:
+            executor = ThreadPoolExecutor(max_workers=args.upload_workers)
+            print(f"   Upload: {args.upload_workers} workers, "
+                  f"{args.upload_batch} shards/commit")
+
+    def submit_pending():
+        """Submit accumulated shards as an upload task."""
+        if not pending_shards:
+            return
+        batch = pending_shards[:]
+        pending_shards.clear()
+        future = executor.submit(
+            upload_shard_batch,
+            shard_paths=batch,
+            repo_id=act_repo,
+            token=hf_token,
+            private=args.upload_private == "true",
+            max_retries=args.upload_retries,
+        )
+        upload_futures.append(future)
+
     # --- Process batches ---
     total_examples = 0
     shard_idx = start_shard
@@ -382,16 +562,24 @@ def main():
         # Forward pass
         hidden = forward_fn(params, jnp.array(batch_tokens))
         
-        # Convert to numpy and save
-        hidden_np = np.array(hidden.astype(jnp.float32))
+        # Convert to numpy (keep model output dtype, e.g. bfloat16)
+        hidden_np = np.asarray(hidden)
         
         # Apply mask: zero out padding positions
-        mask_expanded = batch_masks[:, :, None].astype(np.float32)  # (B, L, 1)
+        mask_expanded = batch_masks[:, :, None].astype(save_dtype)  # (B, L, 1)
         hidden_np = hidden_np * mask_expanded
         
-        # Save shard
+        # Save activation shard
         shard_path = os.path.join(args.output_dir, f"shard_{shard_idx:06d}.npy")
         np.save(shard_path, hidden_np.astype(save_dtype))
+        
+        # Save tokens shard (for CE loss targets during training)
+        tokens_path = os.path.join(args.output_dir, f"shard_{shard_idx:06d}_tokens.npy")
+        np.save(tokens_path, batch_tokens.astype(np.int32))
+        
+        # Save masks shard
+        masks_path = os.path.join(args.output_dir, f"shard_{shard_idx:06d}_masks.npy")
+        np.save(masks_path, batch_masks.astype(np.int32))
         
         shard_idx += 1
         total_examples += len(batch_tokens)
@@ -410,6 +598,14 @@ def main():
             flush=True,
         )
 
+        # Queue for async upload
+        if do_push:
+            pending_shards.append(shard_path)
+            pending_shards.append(tokens_path)
+            pending_shards.append(masks_path)
+            if len(pending_shards) >= args.upload_batch:
+                submit_pending()
+
         # Update metadata (for resume)
         metadata = {
             "target_layer": args.target_layer,
@@ -427,6 +623,31 @@ def main():
         }
         with open(os.path.join(args.output_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
+
+    # --- Flush remaining uploads ---
+    if do_push and executor is not None:
+        # Submit any remaining shards
+        submit_pending()
+
+        # Wait for all uploads to complete
+        if upload_futures:
+            print(f"\n⏳ Waiting for {len(upload_futures)} pending uploads...")
+            done_count = 0
+            for future in as_completed(upload_futures):
+                done_count += 1
+                try:
+                    future.result()  # raises if upload failed
+                except Exception as e:
+                    print(f"  ⚠️  Upload task error: {e}")
+
+        executor.shutdown(wait=True)
+
+        with _upload_lock:
+            uploaded = _upload_stats["uploaded"]
+            failed = _upload_stats["failed"]
+        print(f"   Upload summary: {uploaded} shards uploaded, {failed} failed")
+        if failed > 0:
+            print(f"   ⚠️  Failed shards are still saved locally in {args.output_dir}/")
 
     # --- Final summary ---
     elapsed = time.time() - t_start
