@@ -514,6 +514,9 @@ def make_train_step(
     Frozen params are closed-over constants (baked into XLA graph).
     Logit computation is @jax.checkpoint-ed to avoid materializing
     the full (B, L-1, 262144) tensor during backward.
+
+    Returns:
+        (new_titans_params, new_opt_state, loss_scalar, accuracy_scalar)
     """
     from titans import init_memory_state
 
@@ -522,8 +525,8 @@ def make_train_step(
     fnp = frozen_final_norm_params
 
     @jax.checkpoint
-    def _compute_ce_loss(x, targets, loss_mask):
-        """Compute CE loss from hidden states.
+    def _compute_ce_loss_and_acc(x, targets, loss_mask):
+        """Compute CE loss + accuracy from hidden states.
 
         Checkpointed so the huge (B, L-1, V) logit tensor is freed
         after forward and rematerialized on-demand during backward.
@@ -534,7 +537,12 @@ def make_train_step(
         ce = optax.softmax_cross_entropy_with_integer_labels(
             logits.astype(jnp.float32), targets
         )
-        return (ce * loss_mask).sum() / jnp.maximum(loss_mask.sum(), 1.0)
+        loss = (ce * loss_mask).sum() / jnp.maximum(loss_mask.sum(), 1.0)
+        # Accuracy
+        pred = jnp.argmax(logits, axis=-1)
+        correct = (pred == targets).astype(jnp.float32)
+        acc = (correct * loss_mask).sum() / jnp.maximum(loss_mask.sum(), 1.0)
+        return loss, acc
 
     @jax.jit
     def train_step(titans_params, opt_state, hidden, tokens, mask):
@@ -546,7 +554,7 @@ def make_train_step(
             tokens: Token IDs (B, L) — for CE target (shifted by 1).
             mask: Input mask (B, L) — 1 for real tokens, 0 for padding.
         Returns:
-            (new_titans_params, new_opt_state, loss_scalar)
+            (new_titans_params, new_opt_state, loss_scalar, accuracy_scalar)
         """
         B, L, D = hidden.shape
 
@@ -577,17 +585,16 @@ def make_train_step(
             # 4. Final RMSNorm — FROZEN
             x = final_norm_module.apply(fnp, x)
 
-            # 5. CE loss (shifted by 1: predict next token)
+            # 5. CE loss + accuracy (shifted by 1: predict next token)
             targets = tokens[:, 1:]
             loss_mask = mask[:, 1:].astype(jnp.float32)
-            return _compute_ce_loss(x, targets, loss_mask)
+            return _compute_ce_loss_and_acc(x, targets, loss_mask)
 
-        loss = loss_fn(titans_params)
-        grads = jax.grad(loss_fn)(titans_params)
+        (loss, acc), grads = jax.value_and_grad(loss_fn, has_aux=True)(titans_params)
         updates, new_opt_state = optimizer.update(grads, opt_state, titans_params)
         new_params = optax.apply_updates(titans_params, updates)
 
-        return new_params, new_opt_state, loss
+        return new_params, new_opt_state, loss, acc
 
     return train_step
 
@@ -810,11 +817,12 @@ class Layer23Trainer:
 
             tokens = jnp.array(tokens_arr)
 
-            self.titans_params, self.opt_state, loss = self._train_step(
+            self.titans_params, self.opt_state, loss, acc = self._train_step(
                 self.titans_params, self.opt_state, hidden, tokens, mask,
             )
 
             loss_val = float(loss)
+            acc_val = float(acc)
             loss_history.append(loss_val)
 
             if step % 100 == 0:
@@ -825,6 +833,7 @@ class Layer23Trainer:
                 )
                 print(
                     f"  Step {step:6d} | loss={loss_val:.4f} | "
+                    f"acc={acc_val:.4f} | "
                     f"avg={avg_loss:.4f} | "
                     f"{steps_per_sec:5.2f} steps/s | "
                     f"{elapsed:7.1f}s"
