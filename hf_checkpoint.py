@@ -480,7 +480,10 @@ def load_all_phase1_layers(
         if layer_dir is None:
             print(f"⚠️ Skipping {layer_key} — weights not found.")
             continue
-        combined[layer_key] = checkpointer.restore(os.path.abspath(layer_dir))
+        restored = checkpointer.restore(os.path.abspath(layer_dir))
+        # Unwrap: checkpoint contains {'layer_N': {...}} already — avoid
+        # double-nesting when we assign to combined['layer_N'].
+        combined[layer_key] = restored[layer_key] if layer_key in restored else restored
         print(f"  ✅ Loaded {layer_key} weights")
 
     if not combined:
