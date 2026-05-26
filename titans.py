@@ -198,8 +198,11 @@ def apply_fast_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
     # Force float32 for NS iterations to prevent overflow/precision loss
     t_3d = t_3d.astype(jnp.float32)
     
-    norm = jnp.linalg.norm(t_3d, ord='fro', axis=(-2, -1), keepdims=True)
-    t_3d = t_3d / jnp.maximum(norm, eps)
+    # Safe Frobenius norm to prevent NaN gradients at exactly 0 (e.g., padding tokens)
+    # jnp.linalg.norm computes sqrt(sum(x^2)), derivative at 0 is NaN.
+    sq_norm = jnp.sum(jnp.square(t_3d), axis=(-2, -1), keepdims=True)
+    norm = jnp.sqrt(sq_norm + 1e-12)
+    t_3d = t_3d / norm
     
     # "Агрессивные" коэффициенты из Titans-PyTorch
     a, b, c = 3.4445, -4.7750, 2.0315
