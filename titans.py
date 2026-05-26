@@ -186,7 +186,7 @@ def apply_fast_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
     """
     """
     Сверхбыстрая версия Newton-Schulz для TPU/GPU.
-    Использует сплющивание в 3D, вычисления в bfloat16 и развернутый цикл.
+    Использует сплющивание в 3D, вычисления в float32 и развернутый цикл.
     """
     steps= 3
     eps = 1e-7
@@ -202,7 +202,8 @@ def apply_fast_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
         t_3d = jnp.swapaxes(t_3d, -1, -2)
         
     orig_dtype = t_3d.dtype
-    t_3d = t_3d.astype(jnp.bfloat16)
+    # Force float32 for NS iterations to prevent overflow/precision loss
+    t_3d = t_3d.astype(jnp.float32)
     
     norm = jnp.linalg.norm(t_3d, ord='fro', axis=(-2, -1), keepdims=True)
     t_3d = t_3d / jnp.maximum(norm, eps)
@@ -214,6 +215,8 @@ def apply_fast_ns_to_tensor(t: jnp.ndarray) -> jnp.ndarray:
         A = t_3d @ jnp.swapaxes(t_3d, -1, -2)
         B = b * A + c * (A @ A)
         t_3d = a * t_3d + B @ t_3d
+        # Intermediate clip to keep values within reasonable float32 range
+        t_3d = jnp.clip(t_3d, -1e3, 1e3)
         
     if should_transpose:
         t_3d = jnp.swapaxes(t_3d, -1, -2)
@@ -483,6 +486,8 @@ class NeuralMemory(nn.Module):
         # Применяем спектральную нормализацию Ньютона-Шульца ко всем матрицам (нет)
         surprises = jax.tree_util.tree_map(apply_fast_ns_to_tensor, surprises)
 
+        # Associative scan stability pack: clip surprises to prevent exponential divergence
+        surprises = jax.tree_util.tree_map(lambda t: jnp.clip(t, -5.0, 5.0), surprises)
 
         # associative scan
         next_momentum = {}
