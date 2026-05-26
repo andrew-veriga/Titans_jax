@@ -111,7 +111,7 @@ def huber_loss(pred, target, delta=0.1, **kwargs):
     )
     return jnp.mean(loss, axis=-1)
 
-def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype):
+def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype=jnp.float32):
     mem = default(neural_mem_kwargs, {})
     heads = mem.get('heads', 1)
     dim_head = mem.get('dim_head', dim // heads)
@@ -120,20 +120,13 @@ def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype):
     params = {}
     key = jax.random.PRNGKey(0)
     
-    # Было: одна матрица на все головы
-    # for i in range(mlp_depth):
-    #     key, subkey = jax.random.split(key)
-    #     params[f'weight_{i}'] = (jax.random.normal(subkey, (dim_head, dim_head)) * 0.02).astype(dtype)
-    
-    # Стало: отдельная случайная матрица для каждой головы
+    # Always use float32 for memory weights to prevent accumulation drift in bfloat16
     for i in range(mlp_depth):
         key, subkey = jax.random.split(key)
-        # (batch, heads, dim_head, dim_head) — каждая голова уникальна
         params[f'weight_{i}'] = (
             jax.random.normal(subkey, (batch_size, heads, dim_head, dim_head)) * 0.02
-        ).astype(dtype)
+        ).astype(jnp.float32)
     
-    # Больше не нужен repeat — уже правильная форма
     initial_weights = params
     momentum = jax.tree_util.tree_map(jnp.zeros_like, initial_weights)
     

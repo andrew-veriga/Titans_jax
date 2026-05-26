@@ -113,6 +113,7 @@ def make_routing_optimizer(opt_params: dict):
 
     inner_chain = optax.chain(
         optax.clip_by_global_norm(1.0),
+        optax.zero_nans(), # Guard against NaN gradients in any branch
         # 1. M3 for attention projections (replaces Muon)
         optax.masked(
             m3_optimizer(
