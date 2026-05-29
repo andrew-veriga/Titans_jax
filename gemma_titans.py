@@ -262,11 +262,16 @@ class Gemma_Titans_Config(_config.TransformerConfig):
 
         
 @flax.struct.dataclass
-class DistillationOutput:
+class TrainingOutput:
+    """Universal output container for training mode (Phase 1 distillation, Phase 2 LM, Layer23)."""
     logits: jax.Array
     cache: Optional[Dict[str, Any]]
     hidden_states: Optional[jax.Array]
     layer_losses: Dict[str, jax.Array] = struct.field(default_factory=dict)
+
+
+# Backward-compatible alias
+DistillationOutput = TrainingOutput
 
 
 class Gemma3_1B_Titans(_gemma.Gemma3_1B):
@@ -364,7 +369,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
         return_hidden_states: bool | None = None,
         **kwargs,
-    ) -> Union[DistillationOutput, _transformer.Output]:
+    ) -> Union[TrainingOutput, _transformer.Output]:
         """Forward pass. Broadcasts scalar step to batch dims, then delegates to _forward."""
         # step comes from kontext as scalar (); broadcast to (*B,) so that
         # flatten_unflatten_batch_dim inside _forward sees a properly-shaped array.
@@ -395,7 +400,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
         return_hidden_states: bool | None = None,
         **kwargs,
-    ) -> Union[DistillationOutput, _transformer.Output]:
+    ) -> Union[TrainingOutput, _transformer.Output]:
         """Batched forward pass (called by __call__ after step broadcasting)."""
         return_last_only = self.return_last_only
 
@@ -474,7 +479,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 layer_losses['lm_loss'] = lm_loss
                 layer_losses['lm_accuracy'] = lm_acc
                 
-                return DistillationOutput(
+                return TrainingOutput(
                     logits=jnp.zeros((x.shape[0], 1)),  # логиты не нужны при обучении
                     cache=None if cache is None else new_cache,
                     hidden_states=x if return_hidden_states else None,
@@ -482,7 +487,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                 )
             else:
                 # Phase 1: distillation — skip logit decoder to save HBM
-                return DistillationOutput(
+                return TrainingOutput(
                     logits=jnp.zeros((x.shape[0], 1)),
                     cache=None if cache is None else new_cache,
                     hidden_states=x if return_hidden_states else None,
