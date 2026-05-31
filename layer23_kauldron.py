@@ -109,30 +109,27 @@ class Layer23Model(Gemma3_1B_Titans):
             current_huber_delta=current_huber_delta,
         )
 
-        # Phase 2: LM loss — same logic as parent's _forward
+        # Phase 2: LM loss — compute inline (no @jax.checkpoint to avoid
+        # UnexpectedTracerError: self.embedder captures tracers that leak
+        # from jax.checkpoint scope when __call__ lacks @flax_nn.jit)
         if self.config.is_training_mode and self.config.training_phase == 2:
-            @jax.checkpoint
-            def _lm_loss(hidden, tgt, valid_mask):
-                lc = self.embedder.decode(hidden)
-                if self.config.final_logit_softcap is not None:
-                    lc /= self.config.final_logit_softcap
-                    lc = jnp.tanh(lc) * self.config.final_logit_softcap
-                ce = optax.softmax_cross_entropy_with_integer_labels(
-                    lc.astype(jnp.float32), tgt
-                )
-                valid_mask = valid_mask.astype(jnp.float32)
-                denom = jnp.maximum(valid_mask.sum(axis=-1), 1.0)
-                loss = (ce * valid_mask).sum(axis=-1) / denom
-                pred = jnp.argmax(lc, axis=-1)
-                acc = (
-                    ((pred == tgt).astype(jnp.float32) * valid_mask).sum(axis=-1)
-                    / denom
-                )
-                return loss, acc
+            logits = self.embedder.decode(x[:, :-1, :])
+            if self.config.final_logit_softcap is not None:
+                logits /= self.config.final_logit_softcap
+                logits = jnp.tanh(logits) * self.config.final_logit_softcap
 
             tgt = tokens[:, 1:]
-            valid_mask = inputs_mask[:, 1:]
-            lm_loss, lm_acc = _lm_loss(x[:, :-1, :], tgt, valid_mask)
+            valid_mask = inputs_mask[:, 1:].astype(jnp.float32)
+            ce = optax.softmax_cross_entropy_with_integer_labels(
+                logits.astype(jnp.float32), tgt
+            )
+            denom = jnp.maximum(valid_mask.sum(axis=-1), 1.0)
+            lm_loss = (ce * valid_mask).sum(axis=-1) / denom
+            pred = jnp.argmax(logits, axis=-1)
+            lm_acc = (
+                ((pred == tgt).astype(jnp.float32) * valid_mask).sum(axis=-1)
+                / denom
+            )
             layer_losses['lm_loss'] = lm_loss
             layer_losses['lm_accuracy'] = lm_acc
 
