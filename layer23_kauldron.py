@@ -70,6 +70,8 @@ class Layer23Model(Gemma3_1B_Titans):
         step,
         **kwargs,
     ) -> Union[TrainingOutput, _transformer.Output]:
+        # Cast activations to model's dtype (e.g. bfloat16)
+        hidden = hidden.astype(self.dtype)
         B, L, D = hidden.shape
 
         # step handling (same as parent)
@@ -163,14 +165,19 @@ class Layer23InitTransform(kd.ckpts.InitTransform):
             Useful for ablation / from-scratch training.
     """
 
-    def __init__(self, merged_params, titans_first_layer=23, random_init_titans=False):
+    def __init__(self, merged_params, titans_first_layer=23, random_init_titans=False, dtype=jnp.bfloat16):
         self.merged_params = unfreeze(merged_params)
         self.titans_first_layer = titans_first_layer
         self.random_init_titans = random_init_titans
+        self.dtype = dtype
 
         # Standard Titans layer indices
         self._all_titans = (11, 17, 23)
         self._active_titans = {f'layer_{l}' for l in self._all_titans if l >= titans_first_layer}
+
+    def _cast_to_dtype(self, params):
+        """Cast all parameter arrays to self.dtype."""
+        return jax.tree.map(lambda x: x.astype(self.dtype) if hasattr(x, 'astype') else x, params)
 
     def transform(self, state):
         p = self.merged_params
@@ -182,14 +189,14 @@ class Layer23InitTransform(kd.ckpts.InitTransform):
             key = f'layer_{i}'
             if key in p:
                 if self.random_init_titans and key in self._active_titans:
-                    # Skip TitansBlock layers — keep random init from state
+                    # Keep Flax's built-in init (lecun_normal for kernels, constant for biases)
                     if key in state.params:
-                        params[key] = unfreeze(state.params[key])
-                        print(f"  🎲 {key}: random init (TitansBlock)")
+                        params[key] = self._cast_to_dtype(unfreeze(state.params[key]))
+                        print(f"  🎲 {key}: random init (TitansBlock, Flax defaults) → {self.dtype}")
                     continue
-                params[key] = p[key]
-        params['final_norm'] = p['final_norm']
-        params['embedder'] = p['embedder']
+                params[key] = self._cast_to_dtype(p[key])
+        params['final_norm'] = self._cast_to_dtype(p['final_norm'])
+        params['embedder'] = self._cast_to_dtype(p['embedder'])
         return state.replace(params=freeze(params))
 
 
