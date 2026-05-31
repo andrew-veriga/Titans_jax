@@ -25,6 +25,7 @@ from kauldron import kontext
 
 from gemma.gm.nn import _transformer
 from gemma.gm.utils import _jax_utils
+from gemma.gm.utils import _dtype_params
 
 from gemma_titans import Gemma3_1B_Titans, Gemma_Titans_Config, TrainingOutput
 from titans import init_memory_state
@@ -57,8 +58,122 @@ class Layer23Model(Gemma3_1B_Titans):
         super().setup()
         first = self.config.titans_first_layer
         self.blocks = self.blocks[first:]
+        self._block_offset = first  # remember offset for _apply_attention
         print(f"Layer23Model: sliced blocks to [{first}..{first+len(self.blocks)-1}] "
               f"({len(self.blocks)} blocks)")
+
+    # ── _apply_attention: fix layer indices after block slicing ──
+    def _apply_attention(self, inputs, cache, is_training, current_huber_delta=None):
+        """Override parent: adjust layer indices for sliced blocks."""
+        x = inputs.embeddings
+        x_prev = x
+
+        old_cache = cache or {}
+        new_cache = {}
+        layer_losses = {}
+
+        # Build student mask (truncated window) — same as parent
+        if inputs.attention_mask is not None:
+            k_len = inputs.attention_mask.shape[-1]
+            window = 128
+            q_pos = inputs.positions[:, :, None]
+            k_pos = jnp.arange(k_len, dtype=jnp.int32)[None, None, :]
+            sliding_window = (q_pos - k_pos) < window
+            s_mask = inputs.attention_mask & sliding_window
+        else:
+            s_mask = None
+
+        from gemma_titans import TitansBlock
+
+        offset = self._block_offset
+        for i, block in enumerate(self.blocks):
+            real_i = i + offset  # actual layer index in full model
+            layer_name = f'layer_{real_i}'
+
+            if isinstance(block, TitansBlock):
+                if is_training and self.config.training_phase == 1:
+                    # Phase 1 distillation (not typical for Layer23 but kept for completeness)
+                    layer_cache_teacher, out_teacher = block(
+                        x, inputs.positions, old_cache.get(layer_name),
+                        inputs.attention_mask, is_teacher_mode=True,
+                        kv_seq=x_prev if block.diff_view else None,
+                        current_huber_delta=current_huber_delta,
+                    )
+                    layer_cache_student, out_student = block(
+                        jax.lax.stop_gradient(x), inputs.positions,
+                        old_cache.get(layer_name), s_mask,
+                        is_teacher_mode=False,
+                        kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None,
+                        current_huber_delta=current_huber_delta,
+                    )
+                    if layer_cache_student is not None and 'avg_mem_loss' in layer_cache_student:
+                        layer_losses[f"mem_loss_{layer_name}"] = layer_cache_student['avg_mem_loss']
+                    else:
+                        layer_losses[f"mem_loss_{layer_name}"] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
+                    delta_teacher = jax.lax.stop_gradient(out_teacher - x)
+                    delta_student = out_student - x
+                    layer_loss = self.cos_by_softmax(delta_teacher, delta_student)
+                    layer_loss = layer_loss * inputs.inputs_mask.astype(layer_loss.dtype)
+                    layer_losses[f"loss_{layer_name}"] = layer_loss
+                    if layer_cache_student is not None and 'gate_values' in layer_cache_student:
+                        layer_losses[f"gate_{layer_name}"] = layer_cache_student['gate_values']
+                    else:
+                        layer_losses[f"gate_{layer_name}"] = jnp.zeros_like(x)
+                    x_prev = x
+                    x = out_teacher
+                    if layer_cache_teacher is not None:
+                        merged_cache = dict(layer_cache_teacher)
+                        if layer_cache_student is not None and 'memory_state' in layer_cache_student:
+                            merged_cache['memory_state'] = layer_cache_student['memory_state']
+                        new_cache[layer_name] = merged_cache
+                    else:
+                        new_cache[layer_name] = None
+                else:
+                    # Phase 2 / Inference: stop_gradient at first TitansBlock
+                    if real_i == self.config.titans_first_layer and is_training:
+                        x = jax.lax.stop_gradient(x)
+                        x_prev = jax.lax.stop_gradient(x_prev)
+
+                    layer_cache_student, out_student = block(
+                        x, inputs.positions, old_cache.get(layer_name),
+                        s_mask if s_mask is not None else inputs.attention_mask,
+                        False,  # is_teacher_mode
+                        x_prev if block.diff_view else None,
+                        current_huber_delta=current_huber_delta,
+                    )
+                    if layer_cache_student is not None and 'avg_mem_loss' in layer_cache_student:
+                        layer_losses[f"mem_loss_{layer_name}"] = layer_cache_student['avg_mem_loss']
+                    x_prev = x
+                    x = out_student
+                    new_cache[layer_name] = layer_cache_student
+            else:
+                # Standard Gemma Block
+                layer_cache, out_next = block(
+                    x, inputs.positions, old_cache.get(layer_name),
+                    inputs.attention_mask,
+                )
+                x_prev = x
+                x = out_next
+                new_cache[layer_name] = layer_cache
+
+        x = self.final_norm(x)
+
+        # Phase 1 total distillation loss (same as parent)
+        if self.config.training_phase == 1 and is_training:
+            mask_float = inputs.inputs_mask.astype(jnp.float32)
+            mask_count = jnp.maximum(mask_float.sum(axis=-1), 1.0)
+            total_distill = jnp.zeros((x.shape[0],), dtype=jnp.float32)
+            count = 0
+            for k, v in layer_losses.items():
+                if k.startswith("loss_layer_"):
+                    total_distill = total_distill + v.astype(jnp.float32).sum(axis=-1) / mask_count
+                    count += 1
+            if count > 0:
+                layer_losses['lm_loss'] = total_distill / count
+            else:
+                layer_losses['lm_loss'] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
+
+        return x, new_cache, layer_losses
 
     # ── forward: accept precomputed activations ───────────────
     def __call__(
@@ -103,52 +218,63 @@ class Layer23Model(Gemma3_1B_Titans):
         if huber_delta_cfg is not None:
             current_huber_delta = huber_delta_cfg(step_scalar) if callable(huber_delta_cfg) else huber_delta_cfg
 
-        # Reuse parent's _apply_attention (TitansBlock + Gemma blocks + final_norm)
-        x, new_cache, layer_losses = self._apply_attention(
-            inputs,
-            None,  # cache — not used during training
-            is_training=self.config.is_training_mode,
-            current_huber_delta=current_huber_delta,
-        )
+        # Use same dtype context as parent _forward — ensures all Flax
+        # parameter lookups use the correct dtype (e.g. bfloat16).
+        # Without this, Flax may use float32 internally, causing dtype
+        # mismatches and potential NaN from mixed-precision issues.
+        with _dtype_params.initialize_param_with_dtype(
+            self.dtype,
+            exclude=[
+                'vision_encoder',
+                'embedder.mm_input_projection',
+                'embedder.mm_soft_embedding_norm',
+                'lora',
+            ],
+        ):
+            # Reuse parent's _apply_attention (TitansBlock + Gemma blocks + final_norm)
+            x, new_cache, layer_losses = self._apply_attention(
+                inputs,
+                None,  # cache — not used during training
+                is_training=self.config.is_training_mode,
+                current_huber_delta=current_huber_delta,
+            )
 
-        # Phase 2: LM loss — compute inline (no @jax.checkpoint to avoid
-        # UnexpectedTracerError: self.embedder captures tracers that leak
-        # from jax.checkpoint scope when __call__ lacks @flax_nn.jit)
-        if self.config.is_training_mode and self.config.training_phase == 2:
-            logits = self.embedder.decode(x[:, :-1, :])
-            if self.config.final_logit_softcap is not None:
-                logits /= self.config.final_logit_softcap
-                logits = jnp.tanh(logits) * self.config.final_logit_softcap
+            # Phase 2: LM loss — inside dtype context so embedder uses correct dtype
+            if self.config.is_training_mode and self.config.training_phase == 2:
+                logits = self.embedder.decode(x[:, :-1, :])
+                if self.config.final_logit_softcap is not None:
+                    logits /= self.config.final_logit_softcap
+                    logits = jnp.tanh(logits) * self.config.final_logit_softcap
 
-            tgt = tokens[:, 1:]
-            valid_mask = inputs_mask[:, 1:].astype(jnp.float32)
-            ce = optax.softmax_cross_entropy_with_integer_labels(
-                logits.astype(jnp.float32), tgt
-            )
-            denom = jnp.maximum(valid_mask.sum(axis=-1), 1.0)
-            lm_loss = (ce * valid_mask).sum(axis=-1) / denom
-            pred = jnp.argmax(logits, axis=-1)
-            lm_acc = (
-                ((pred == tgt).astype(jnp.float32) * valid_mask).sum(axis=-1)
-                / denom
-            )
-            layer_losses['lm_loss'] = lm_loss
-            layer_losses['lm_accuracy'] = lm_acc
+                tgt = tokens[:, 1:]
+                valid_mask = inputs_mask[:, 1:].astype(jnp.float32)
+                ce = optax.softmax_cross_entropy_with_integer_labels(
+                    logits.astype(jnp.float32), tgt
+                )
+                denom = jnp.maximum(valid_mask.sum(axis=-1), 1.0)
+                lm_loss = (ce * valid_mask).sum(axis=-1) / denom
+                pred = jnp.argmax(logits, axis=-1)
+                lm_acc = (
+                    ((pred == tgt).astype(jnp.float32) * valid_mask).sum(axis=-1)
+                    / denom
+                )
+                layer_losses['lm_loss'] = lm_loss
+                layer_losses['lm_accuracy'] = lm_acc
 
-            return TrainingOutput(
-                logits=jnp.zeros((B, 1)),
-                cache=None,
-                hidden_states=None,
-                layer_losses=layer_losses,
-            )
-        else:
-            # Non-training or Phase 1 — shouldn't normally happen for this model
-            return TrainingOutput(
-                logits=jnp.zeros((B, 1)),
-                cache=None,
-                hidden_states=x,
-                layer_losses=layer_losses,
-            )
+                return TrainingOutput(
+                    logits=jnp.zeros((B, 1)),
+                    cache=None,
+                    hidden_states=None,
+                    layer_losses=layer_losses,
+                )
+            else:
+                # Non-training or Phase 1 — shouldn't normally happen for this model
+                return TrainingOutput(
+                    logits=jnp.zeros((B, 1)),
+                    cache=None,
+                    hidden_states=x,
+                    layer_losses=layer_losses,
+                )
 
 
 # ──────────────────── Init Transform ────────────────────────────
