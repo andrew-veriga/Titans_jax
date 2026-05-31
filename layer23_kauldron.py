@@ -155,21 +155,41 @@ class Layer23Model(Gemma3_1B_Titans):
 # ──────────────────── Init Transform ────────────────────────────
 
 class Layer23InitTransform(kd.ckpts.InitTransform):
-    """Loads merged_params, keeps only layers from titans_first_layer onward + embedder."""
+    """Loads merged_params, keeps only layers from titans_first_layer onward + embedder.
 
-    def __init__(self, merged_params, titans_first_layer=23):
+    Args:
+        merged_params: Full model params (Gemma + Titans weights merged).
+        titans_first_layer: First layer index to keep (default 23).
+        random_init_titans: If True, TitansBlock layers (layer_23 etc.)
+            are initialized from the model's random init state instead of
+            merged_params. Frozen layers still come from merged_params.
+            Useful for ablation / from-scratch training.
+    """
+
+    def __init__(self, merged_params, titans_first_layer=23, random_init_titans=False):
         self.merged_params = unfreeze(merged_params)
         self.titans_first_layer = titans_first_layer
+        self.random_init_titans = random_init_titans
+
+        # Standard Titans layer indices
+        self._all_titans = (11, 17, 23)
+        self._active_titans = {f'layer_{l}' for l in self._all_titans if l >= titans_first_layer}
 
     def transform(self, state):
         p = self.merged_params
-        # Build params dict for sliced model:
-        # layers [titans_first_layer..25] + final_norm + embedder
         num_layers = 26  # Gemma 1B has 26 layers (0..25)
+
+        # Start with frozen layers from merged_params
         params = {}
         for i in range(self.titans_first_layer, num_layers):
             key = f'layer_{i}'
             if key in p:
+                if self.random_init_titans and key in self._active_titans:
+                    # Skip TitansBlock layers — keep random init from state
+                    if key in state.params:
+                        params[key] = unfreeze(state.params[key])
+                        print(f"  🎲 {key}: random init (TitansBlock)")
+                    continue
                 params[key] = p[key]
         params['final_norm'] = p['final_norm']
         params['embedder'] = p['embedder']
