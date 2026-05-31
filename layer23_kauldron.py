@@ -222,6 +222,7 @@ def get_activation_dataset(
     batch_size=8,
     max_seq_len=1024,
     embed_dim=1152,
+    cache_dir= None
 ):
     """Kauldron dataset pipeline for precomputed activations."""
     return kd.data.py.HuggingFace(
@@ -234,4 +235,6 @@ def get_activation_dataset(
         transforms=[
             _ProcessActivations(max_seq_len, embed_dim),
             kd.data.py.Elements(keep=["activations", "tokens", "mask"]),
-        ])
+        ],
+        cache_dir= cache_dir
+        )
