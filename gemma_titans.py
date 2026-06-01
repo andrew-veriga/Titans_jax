@@ -131,6 +131,7 @@ class TitansBlock(_modules.Block):
         is_teacher_mode: bool = False,
         kv_seq: Optional[jax.Array] = None,
         current_huber_delta: Optional[Union[float, jax.Array]] = None,
+        input_mask: Optional[jax.Array] = None,
         **kwargs,
     ) -> tuple[Optional[Dict[str, Any]], jax.Array]:
         
@@ -166,7 +167,8 @@ class TitansBlock(_modules.Block):
                 memory_state=mem_state,
                 return_next_memories=True,
                 kv_seq=kv_seq,
-                loss_kwargs=loss_kwargs
+                loss_kwargs=loss_kwargs,
+                input_mask=input_mask,
             )
             # Динамический вентиль: вычисляется на основе входного вектора
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
@@ -579,7 +581,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         s_mask, # student mask
                         is_teacher_mode=False,
                         kv_seq=jax.lax.stop_gradient(x_prev) if block.diff_view else None,
-                        current_huber_delta=current_huber_delta
+                        current_huber_delta=current_huber_delta,
+                        input_mask=inputs.inputs_mask,
                     )
                     
                     # 2b. Log memory MSE loss (from student's memory update)
@@ -630,7 +633,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         s_mask if s_mask is not None else inputs.attention_mask,
                         False,  # is_teacher_mode
                         x_prev if block.diff_view else None,
-                        current_huber_delta=current_huber_delta
+                        current_huber_delta=current_huber_delta,
+                        input_mask=inputs.inputs_mask,
                     )
                     # Log memory MSE loss (works in both Phase 2 and inference)
                     if layer_cache_student is not None and 'avg_mem_loss' in layer_cache_student:

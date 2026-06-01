@@ -335,10 +335,13 @@ class NeuralMemory(nn.Module):
     def init_state(self, batch_size: int, *, dtype: Any):
         return init_memory_state(batch_size, self.dim, self.neural_mem_kwargs, dtype=dtype)
 
-    def store_memories(self, seq, past_state, kv_seq=None, loss_kwargs=None):
+    def store_memories(self, seq, past_state, kv_seq=None, loss_kwargs=None, input_mask=None):
         """
         реализует механизм ассоциативной памяти, 
         где веса модели обновляются на лету на основе входной последовательности
+        
+        input_mask: (B, N) — 1 for real tokens, 0 for padding. Zeros out keys/values
+                    on padding positions so memory is not polluted by padding tokens.
         """
         loss_kwargs = default(loss_kwargs, {})
         batch = seq.shape[0]
@@ -406,6 +409,15 @@ class NeuralMemory(nn.Module):
             # ---------------------------------
         else:
             values = jax.lax.stop_gradient(values)
+
+        # Mask padding positions: zero out keys/values for padding tokens
+        # so memory is not polluted by padding content.
+        if exists(input_mask):
+            # input_mask: (B, N) → truncate to match round_down_seq_len
+            mask = input_mask[:, :round_down_seq_len]  # (B, N_round)
+            # Broadcast: (B, 1, N_round, 1) * (B, H, N_round, D) → (B, H, N_round, D)
+            keys   = keys   * mask[:, None, :, None]
+            values = values * mask[:, None, :, None]
 
         num_chunks = round_down_seq_len // self.chunk_size
 
@@ -582,7 +594,7 @@ class NeuralMemory(nn.Module):
             
         return values
 
-    def __call__(self, seq, memory_state=None, return_next_memories=False, kv_seq=None, loss_kwargs=None):
+    def __call__(self, seq, memory_state=None, return_next_memories=False, kv_seq=None, loss_kwargs=None, input_mask=None):
         batch, seq_len = seq.shape[:2]
         
         if seq_len < self.chunk_size:
@@ -594,7 +606,9 @@ class NeuralMemory(nn.Module):
         if not exists(memory_state):
             memory_state = self.init_state(batch, dtype=seq.dtype)
 
-        updates, next_mem_state, avg_mem_loss = self.store_memories(seq, memory_state, kv_seq=kv_seq, loss_kwargs=loss_kwargs)
+        updates, next_mem_state, avg_mem_loss = self.store_memories(
+            seq, memory_state, kv_seq=kv_seq, loss_kwargs=loss_kwargs, input_mask=input_mask
+        )
         
         past_weights, _ = memory_state
         
