@@ -154,7 +154,7 @@ def make_routing_optimizer(opt_params: dict):
     return optax.MultiSteps(
         kd.optim.partial_updates(
             inner_chain,
-            mask=kd.optim.select(["memory", "memory_gate_proj"]),
+            mask=kd.optim.select(["memory", "memory_gate_proj", "titans_ffn", "titans_pre_ffw_norm", "titans_post_ffw_norm"]),
         ),
         every_k_schedule=opt_params["every_k_schedule"],
     )

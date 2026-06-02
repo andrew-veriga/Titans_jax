@@ -55,4 +55,16 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
     # Restore the Titans weights
     state = state.replace(params=titans_tree_utils.merge_titans_params(state.params, titans_params))
 
+    # Clean up: remove old Gemma FFN keys (mlp, pre_ffw_norm, post_ffw_norm)
+    # from Titans layers. After renaming mlp→titans_ffn etc., the old keys are dead weight.
+    # Detection: only Titans layers have 'titans_ffn' in their params.
+    loaded = dict(state.params)
+    for key, layer_params in loaded.items():
+        if isinstance(layer_params, dict) and 'titans_ffn' in layer_params:
+            cleaned = dict(layer_params)
+            for old_key in ('mlp', 'pre_ffw_norm', 'post_ffw_norm'):
+                cleaned.pop(old_key, None)
+            loaded[key] = cleaned
+    state = state.replace(params=loaded)
+
     return state

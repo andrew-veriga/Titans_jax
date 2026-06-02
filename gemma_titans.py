@@ -86,17 +86,17 @@ class TitansBlock(_modules.Block):
         if self.use_post_attn_norm:
             self.post_attention_norm = _layers.RMSNorm()
 
-        self.pre_ffw_norm = _layers.RMSNorm()
+        self.titans_pre_ffw_norm = _layers.RMSNorm()
 
-        self.mlp = _modules.FeedForward(
+        self.titans_ffn = _modules.FeedForward(
             features=self.embed_dim,
             hidden_dim=self.hidden_dim,
             transpose_gating_einsum=self.transpose_gating_einsum,
         )
 
-        self.post_ffw_norm = None
+        self.titans_post_ffw_norm = None
         if self.use_post_ffw_norm:
-            self.post_ffw_norm = _layers.RMSNorm()
+            self.titans_post_ffw_norm = _layers.RMSNorm()
 
         mem_kwargs = dict(self.neural_mem_kwargs or {})
         self.diff_view = mem_kwargs.get('diff_view', False)
@@ -188,12 +188,12 @@ class TitansBlock(_modules.Block):
 
         combined_output += x
 
-        # 3. MLP Branch
-        outputs = self.pre_ffw_norm(combined_output)
-        outputs = self.mlp(outputs)
+        # 3. Titans FFN Branch (independent from Gemma, trainable)
+        outputs = self.titans_pre_ffw_norm(combined_output)
+        outputs = self.titans_ffn(outputs)
 
-        if self.post_ffw_norm is not None:
-            outputs = self.post_ffw_norm(outputs)
+        if self.titans_post_ffw_norm is not None:
+            outputs = self.titans_post_ffw_norm(outputs)
 
         outputs += combined_output
 

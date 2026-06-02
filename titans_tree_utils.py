@@ -30,21 +30,28 @@ def migrate_static_gate_to_dynamic(params: _ParamsDict) -> _ParamsDict:
       new_params[key] = value
   return new_params
 
+# Keys that belong to the Titans-specific parts of a TitansBlock
+# (not present in the original Gemma Block).
+_TITANS_KEYS = frozenset({
+    'memory', 'memory_gate_proj',
+    'titans_ffn', 'titans_pre_ffw_norm', 'titans_post_ffw_norm',
+})
+
 def split_titans_params(params: _ParamsDict) -> SplittedParams:
-  """Split a nested tree into 2 trees, one with and without 'memory' and 'memory_gate_proj' branches."""
+  """Split a nested tree into 2 trees, one with and without Titans-specific branches."""
   original_tree = {}
   titans_tree = {}
 
   def _split_recursive(input_subtree, original_subtree, titans_subtree):
     for key, value in input_subtree.items():
       if isinstance(value, Mapping):
-        if key in ('memory', 'memory_gate_proj'):
+        if key in _TITANS_KEYS:
           titans_subtree[key] = value
         else:
           original_subtree[key] = {}
           titans_subtree[key] = {}
           _split_recursive(value, original_subtree[key], titans_subtree[key])
-      elif key in ('memory', 'memory_gate_proj'):
+      elif key in _TITANS_KEYS:
         titans_subtree[key] = value
       else:
         original_subtree[key] = value
