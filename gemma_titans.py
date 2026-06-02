@@ -86,14 +86,27 @@ class TitansBlock(_modules.Block):
         if self.use_post_attn_norm:
             self.post_attention_norm = _layers.RMSNorm()
 
-        self.titans_pre_ffw_norm = _layers.RMSNorm()
+        # ── Teacher FFN (Phase 1 only): loaded from Gemma checkpoint, frozen ──
+        # Created only when use_original_attn=True (Phase 1).
+        # Phase 2 does not create these → no Gemma weights needed for Titans layers.
+        if self.use_original_attn:
+            self.pre_ffw_norm = _layers.RMSNorm()
+            self.mlp = _modules.FeedForward(
+                features=self.embed_dim,
+                hidden_dim=self.hidden_dim,
+                transpose_gating_einsum=self.transpose_gating_einsum,
+            )
+            self.post_ffw_norm = None
+            if self.use_post_ffw_norm:
+                self.post_ffw_norm = _layers.RMSNorm()
 
+        # ── Student FFN (all phases): randomly initialized, trainable ──
+        self.titans_pre_ffw_norm = _layers.RMSNorm()
         self.titans_ffn = _modules.FeedForward(
             features=self.embed_dim,
             hidden_dim=self.hidden_dim,
             transpose_gating_einsum=self.transpose_gating_einsum,
         )
-
         self.titans_post_ffw_norm = None
         if self.use_post_ffw_norm:
             self.titans_post_ffw_norm = _layers.RMSNorm()
@@ -188,12 +201,19 @@ class TitansBlock(_modules.Block):
 
         combined_output += x
 
-        # 3. Titans FFN Branch (independent from Gemma, trainable)
-        outputs = self.titans_pre_ffw_norm(combined_output)
-        outputs = self.titans_ffn(outputs)
-
-        if self.titans_post_ffw_norm is not None:
-            outputs = self.titans_post_ffw_norm(outputs)
+        # 3. FFN Branch: Teacher uses Gemma FFN (frozen), Student uses Titans FFN (trainable)
+        if is_teacher_mode and self.use_original_attn:
+            # Teacher (Phase 1): use Gemma FFN loaded from checkpoint
+            outputs = self.pre_ffw_norm(combined_output)
+            outputs = self.mlp(outputs)
+            if self.post_ffw_norm is not None:
+                outputs = self.post_ffw_norm(outputs)
+        else:
+            # Student (Phase 1/2/Inference): use trainable Titans FFN
+            outputs = self.titans_pre_ffw_norm(combined_output)
+            outputs = self.titans_ffn(outputs)
+            if self.titans_post_ffw_norm is not None:
+                outputs = self.titans_post_ffw_norm(outputs)
 
         outputs += combined_output
 
