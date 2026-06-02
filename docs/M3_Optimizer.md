@@ -7,6 +7,81 @@
 
 ## 1. Мотивация
 
+Что находится **внутри NeuralMemory** и как это обновляется:
+
+## Два разных типа «весов» в TitansBlock
+
+### Тип 1: Внутренние веса памяти (MLP weights) — `memory_state`
+Это `weight_0`, `weight_1` матрицы формы `(B, H, dim_head, dim_head)`. Они:
+- **Обновляются per-example** через `associative_scan` в `store_memories()`
+- **Сбрасываются** между примерами (cache=None в TrainingOutput → `init_state()` вызывается заново)
+- **НЕ видны** внешнему оптимизатору вообще — они не часть `model.params`
+
+### Тип 2: Проекционные слои (внешние параметры) — `model.params`
+Это Dense-слои, которые определяют **как** кодировать/декодировать информацию:
+- `to_queries` → проекторы для извлечения из памяти
+- `to_keys_values` → проекторы для записи в память
+- `combine_heads` → объединение голов
+- `to_momentum`, `to_adaptive_step`, `to_decay_factor` → контролируют dynamics памяти
+- `memory_gate_proj` → вентиль (Adam-atan2)
+- norms, pooling layers и т.д.
+
+**Эти** параметры оптимизируются **между примерами** через внешний оптимизатор.
+``` mermaid
+flowchart TB
+    subgraph TitansBlock
+        direction TB
+        Input["x_input"]
+        subgraph Memory_Codec["Кодек памяти (M3)"]
+            Q["to_queries"]
+            KV["to_keys_values"]
+            CH["combine_heads"]
+        end
+        subgraph Memory_Controllers["Контроллеры (Adam-atan2)"]
+            MOM["to_momentum"]
+            ADAPT["to_adaptive_step"]
+            DECAY["to_decay_factor"]
+        end
+        Gate["memory_gate_proj<br/>(Adam-atan2)"]
+        subgraph NeuralMemory["Нейронная память (NLM)"]
+            Store["store_memories()"]
+            W0["weight₀ (B,H,d,d)"]
+            W1["weight₁ (B,H,d,d)"]
+            Retrieve["retrieve_memories() query × W"]
+        end
+        Add1["+residual"]
+        MLP["MLP (FeedForward)"]
+        Add2["+residual"]
+        Output["x_output"]
+    end
+    Input --> Q & KV & Gate
+    Q --> Retrieve
+    KV --> Store
+    MOM & ADAPT & DECAY --> Store
+    Store --> W0 & W1
+    W0 & W1 --> Retrieve
+    Retrieve --> CH --> Gate --> Add1
+    Input --> Add1
+    Add1 --> MLP --> Add2
+    Add1 --> Add2 --> Output
+```
+### Маршрутизация оптимизатора:
+
+| Параметры | Оптимизатор | Что делает |
+|-----------|-------------|------------|
+| `to_queries`, `to_keys_values`, `combine_heads` | **M3** (slow+fast momentum) | Проекции «кодека» памяти |
+| `memory_gate_proj` | **Adam-atan2** | Вентиль gate |
+| Всё остальное (`to_momentum`, `to_adaptive_step`, `to_decay_factor`, norms, pooling) | **Adam-atan2** | Контроллеры динамики памяти |
+
+### Итого: что обучается медленным моментумом?
+
+**M3 с `slow_update_freq=8`** обучает только **3 проекционных ядра**:
+1. `to_queries/kernel` — как формировать запросы к памяти
+2. `to_keys_values/kernel` — как формировать ключи/значения для записи
+3. `combine_heads/kernel` — как объединять выходы голов
+
+Это «кодек» памяти — он определяет **как** информация преобразуется перед попаданием в память и после извлечения. Медленный моментум здесь полезен: проекции должны быть стабильными across many diverse examples, а не подстраиваться под каждый отдельный пример.
+
 ### Проблема: катастрофическое забывание оптимизатора
 
 Стандартный Adam/SGD с моментумом эквивалентен **контекстному окну размером ~40 шагов** (при β=0.9). При обучении на последовательных данных с разными задачами/чанками:
@@ -65,26 +140,23 @@ def newton_schulz(M, steps=5):
 В Phase 1 training параметры модели разделены на 3 группы, каждая со своим оптимизатором:
 
 ```
-┌─────────────────────────┬──────────────────────┬──────────────────┐
-│ Группа параметров        │ Оптимизатор           │ Ключи            │
-├─────────────────────────┼──────────────────────┼──────────────────┤
-│ Neural Memory (Titans)   │ M3 (Muon + CMS)      │ *neural_memory*  │
-│                         │                       │ *to_keys_values* │
-│                         │                       │ *to_queries*     │
-│                         │                       │ *combine_heads*  │
-│                         │                       │ *chunk_pool*     │
-│                         │                       │ *retrieve*       │
-│                         │                       │ *store*          │
-│                         │                       │ *to_decay*       │
-│                         │                       │ *to_adaptive*    │
-│                         │                       │ *to_momentum*    │
-│                         │                       │ *multihead_norm* │
-│                         │                       │ *empty_memory*   │
-├─────────────────────────┼──────────────────────┼──────────────────┤
-│ Gate (memory_gate_proj) │ Adam-atan2            │ *gate*           │
-├─────────────────────────┼──────────────────────┼──────────────────┤
-│ Остальные (Gemma frozen)│ Adam-atan2 (freeze)   │ всё остальное    │
-└─────────────────────────┴──────────────────────┴──────────────────┘
+┌──────────────────────────────┬───────────────────────┬───────────────────────────┐
+│ Группа параметров            │ Оптимизатор           │ Ключи                     │
+├──────────────────────────────┼───────────────────────┼───────────────────────────┤
+│ Memory Codec                 │  M3 (Muon + CMS)      │ *to_queries*              │
+│                              │                       │ *to_keys_values*          │
+│                              │                       │ *combine_heads*           │
+├──────────────────────────────┼───────────────────────┼───────────────────────────┤
+│ Gate                         │ Adam-atan2            │ *gate*                    │
+├──────────────────────────────┼───────────────────────┼───────────────────────────┤
+│ Memory Controllers           │ Adam-atan2            │ *to_momentum*             │
+│                              │                       │ *to_adaptive_step*        │
+│                              │                       │ *to_decay_factor*         │
+│                              │                       │ *chunk_pool*              │
+│                              │                       │ norms, pooling и т.д.     │
+├──────────────────────────────┼───────────────────────┼───────────────────────────┤
+│ Остальные (Gemma frozen)     │ Adam-atan2 (freeze)   │ всё остальное             │
+└──────────────────────────────┴───────────────────────┴───────────────────────────┘
 ```
 
 ### Параметры M3
