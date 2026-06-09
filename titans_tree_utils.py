@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 from typing import Any, NamedTuple
 from collections.abc import Mapping
 
@@ -115,6 +116,23 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
       if isinstance(layer_params, Mapping) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
         if 'attn' in layer_params:
           del layer_params['attn']
+
+  # Initialize titans_* parameters from Gemma weights if not present in checkpoint.
+  # This allows Titans FFN to start from pretrained Gemma weights instead of random init.
+  _TITANS_FROM_GEMMA = {
+      'mlp': 'titans_ffn',
+      'pre_ffw_norm': 'titans_pre_ffw_norm',
+      'post_ffw_norm': 'titans_post_ffw_norm',
+  }
+  for layer_name, layer_params in merged.items():
+    if not isinstance(layer_params, Mapping):
+      continue
+    # Only process Titans layers (those with memory or memory_gate_proj)
+    if 'memory' not in layer_params and 'memory_gate_proj' not in layer_params:
+      continue
+    for gemma_key, titans_key in _TITANS_FROM_GEMMA.items():
+      if titans_key not in layer_params and gemma_key in layer_params:
+        layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
            
   return merged
 
