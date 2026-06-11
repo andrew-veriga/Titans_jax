@@ -320,7 +320,14 @@ class Layer23InitTransform(kd.ckpts.InitTransform):
                         params[key] = self._cast_to_dtype(unfreeze(state.params[key]))
                         print(f"  🎲 {key}: random init (TitansBlock, Flax defaults) → {self.dtype}")
                     continue
-                params[key] = self._cast_to_dtype(p[key])
+                
+                layer_p = dict(p[key])
+                # Удаляем мертвые параметры оригинальной Gemma FFN в активных слоях Titans
+                if key in self._active_titans:
+                    for dead_key in ['mlp', 'pre_ffw_norm', 'post_ffw_norm']:
+                        if dead_key in layer_p:
+                            del layer_p[dead_key]
+                params[key] = self._cast_to_dtype(layer_p)
         params['final_norm'] = self._cast_to_dtype(p['final_norm'])
         params['embedder'] = self._cast_to_dtype(p['embedder'])
         return state.replace(params=freeze(params))
