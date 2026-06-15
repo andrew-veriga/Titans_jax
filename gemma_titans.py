@@ -217,13 +217,18 @@ class TitansBlock(_modules.Block):
 
         outputs += combined_output
 
-        # Construct new cache - ALWAYS return a dict to preserve metrics (gate, loss)
-        # even if input cache was None. Gemma3_1B_Titans._forward handles the 
-        # external 'None' return if needed.
+        # Construct new cache.
+        # During training (cache is None), we include metrics (avg_mem_loss, gate_values)
+        # so _apply_attention can extract them for logging.
+        # During inference (cache provided), we MUST NOT add extra keys — the Sampler's
+        # jax.lax.while_loop requires the cache pytree structure to be identical between
+        # iterations. Extra keys or shape-changing arrays break it.
         new_cache = dict(new_attn_cache or {})
         new_cache['memory_state'] = next_mem_state
-        new_cache['avg_mem_loss'] = avg_mem_loss  # Store memory loss metric in cache
-        new_cache['gate_values'] = gate  # [B, L, embed_dim]
+        if cache is None:
+            # Training: cache not used for generation, metrics are safe to include
+            new_cache['avg_mem_loss'] = avg_mem_loss
+            new_cache['gate_values'] = gate
 
         return new_cache, outputs
 
