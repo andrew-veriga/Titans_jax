@@ -600,7 +600,11 @@ class NeuralMemory(nn.Module):
         if seq_len < self.chunk_size:
             ret = repeat(self.empty_memory_embed, 'd -> b n d', b=batch, n=seq_len)
             if return_next_memories:
-                return ret, memory_state
+                # Inference-only path: token-by-token decode has seq_len=1 < chunk_size.
+                # Return 3-tuple to match the store_memories contract; loss is zero
+                # because memory is not updated on sub-chunk sequences.
+                avg_mem_loss = jnp.zeros((batch,), dtype=jnp.float32)
+                return ret, memory_state, avg_mem_loss
             return ret
 
         if not exists(memory_state):
