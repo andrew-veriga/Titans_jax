@@ -251,7 +251,10 @@ class Gemma_Titans_Config(_config.TransformerConfig):
             # store_memory_loss_fn auto-selected by NeuralMemory.setup():
             #   huber_loss_delta is not None → huber_loss
             #   huber_loss_delta is None      → default_loss_fn (MSE)
-        }
+        },
+        # Exclude from __hash__: dict is unhashable, which breaks Flax module hashing
+        # (required by @flax_nn.jit on __call__). Safe at inference (single config per session).
+        hash=False,
     )
 
     is_training_mode: bool = True
