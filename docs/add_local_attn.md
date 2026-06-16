@@ -294,7 +294,7 @@ self.memory_gate_proj = flax_nn.Dense(
     features=self.embed_dim,
     use_bias=True,
     kernel_init=flax_nn.initializers.lecun_normal(),
-    bias_init=flax_nn.initializers.constant(2.0),  # sigmoid(2) ≈ 0.88
+    bias_init=flax_nn.initializers.constant(-1.0),  # sigmoid(-1) ≈ 0.27
     name='memory_gate_proj'
 )
 gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
@@ -304,7 +304,7 @@ gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 
 
 1. **Контекстозависимость:** Статический вектор даёт одинаковый gate для всех токенов. Dense-слой вычисляет gate на основе текущего токена — модель учится когда доверять памяти, а когда local_attn.
 
-2. **`bias_init=2.0`:** `sigmoid(2) ≈ 0.88` — gate изначально "открыт" для памяти. Это даёт памяти шанс быть услышанной на ранних этапах обучения.
+2. **`bias_init=-1.0`:** `sigmoid(-1) ≈ 0.27` — gate изначально "прикрыт". Память инициализируется случайно, поэтому высокий gate (2.0→0.88) заливал случайный шум в выход и препятствовал снижению loss. По мере обучения memory, gate будет постепенно открываться.
 
 3. **`clip(-10, 10)`:** Предотвращает насыщение sigmoid в зонах с нулевым градиентом.
 

@@ -145,13 +145,15 @@ class TitansBlock(_modules.Block):
         # 1152 независимых вентиля
         # ДИНАМИЧЕСКИЙ ВЕНТИЛЬ: вместо статического параметра используем Dense-слой
         # для вычисления важности памяти на основе текущего токена
-        # bias_init=+2.0 → sigmoid(2) ≈ 0.88: gate изначально "открыт"
+        # bias_init=-1.0 → sigmoid(-1) ≈ 0.27: gate изначально "прикрыт"
+        # Память random-init, поэтому открываем gate постепенно по мере обучения memory.
+        # Слишком высокий gate (2.0→0.88) заливал случайный шум memory в выход → loss не снижался.
         self.memory_gate_proj = flax_nn.Dense(
             features=self.embed_dim, 
             use_bias=True,
             kernel_init=flax_nn.initializers.lecun_normal(),
             # bias_init=flax_nn.initializers.constant(1.0),
-            bias_init=flax_nn.initializers.constant(2.0),
+            bias_init=flax_nn.initializers.constant(-1.0),
             name='memory_gate_proj'
         )
         

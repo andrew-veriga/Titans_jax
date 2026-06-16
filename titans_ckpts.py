@@ -77,11 +77,26 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
     # At this point, local_attn is random (from titans_tree split), while attn has
     # real Gemma weights. We overwrite local_attn with attn copy for all Titans layers.
     # This prevents training divergence caused by frozen random local_attn output.
+    #
+    # Same issue applies to titans_ffn, titans_pre_ffw_norm, titans_post_ffw_norm:
+    # they are in _TITANS_KEYS, so split_titans_params puts them in titans_tree (random),
+    # and after merge they already exist → merge_titans_params auto-init does NOT fire.
+    # We must explicitly copy from Gemma weights (mlp, pre_ffw_norm, post_ffw_norm).
     loaded_params = dict(state.params)
+    _TITANS_INIT_MAP = {
+        'local_attn': 'attn',
+        'titans_ffn': 'mlp',
+        'titans_pre_ffw_norm': 'pre_ffw_norm',
+        'titans_post_ffw_norm': 'post_ffw_norm',
+    }
     for key, layer_params in loaded_params.items():
       if 'layer_' in key and isinstance(layer_params, dict):
-        if 'memory' in layer_params and 'local_attn' in layer_params and 'attn' in layer_params:
-          layer_params['local_attn'] = copy.deepcopy(layer_params['attn'])
+        # Only process Titans layers (have 'memory' or 'memory_gate_proj')
+        is_titans = 'memory' in layer_params or 'memory_gate_proj' in layer_params
+        if is_titans:
+          for titans_key, gemma_key in _TITANS_INIT_MAP.items():
+            if titans_key in layer_params and gemma_key in layer_params:
+              layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
     state = state.replace(params=loaded_params)
 
     return state
