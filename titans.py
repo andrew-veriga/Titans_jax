@@ -122,7 +122,7 @@ def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype=jnp.float32):
     params = {}
     # Initialize with zeros as a sentinel for dynamic initialization
     for i in range(mlp_depth):
-        params[f'weight_{i}'] = jnp.zeros((batch_size, heads, dim_head, dim_head), dtype=jnp.float32)
+        params[f'weight_{i}'] = jnp.zeros((batch_size, heads, dim_head, dim_head), dtype=dtype)
 
     initial_weights = params
     momentum = jax.tree_util.tree_map(jnp.zeros_like, initial_weights)
