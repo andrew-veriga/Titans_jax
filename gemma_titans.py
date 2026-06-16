@@ -760,9 +760,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         dt_norm = delta_teacher * inv_norm_t
         ds_norm = delta_student * inv_norm_s
                             
-        # SUM по D, MEAN по токенам — сохраняет масштаб
+        # SUM по D, keep L — сохраняет масштаб, форма (B, L) для маскирования паддинга
         raw_diff = (ds_norm - dt_norm) ** 2
-        layer_loss = jnp.mean(jnp.sum(raw_diff, axis=-1), axis=-1)  # (B,)
+        layer_loss = jnp.sum(raw_diff, axis=-1)  # (B, L)
         return layer_loss
 
     def init_cache(
