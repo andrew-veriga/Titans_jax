@@ -608,12 +608,12 @@ class NeuralMemory(nn.Module):
 
         past_weights, past_momentum, token_buffer, buffer_count = memory_state
 
+        # Force parameter initialization for self.memory_model OUTSIDE cond to prevent tracer leaks
+        dummy_input = jnp.zeros((1, self.dim_head), dtype=seq.dtype)
+        _ = self.memory_model(dummy_input)
+
         # DYNAMIC INITIALIZATION: If past_weights is fresh (all zeros), initialize from MemoryMLP parameters
         def get_base_weights(unused):
-            # Force parameter initialization for self.memory_model
-            dummy_input = jnp.zeros((1, self.dim_head), dtype=seq.dtype)
-            _ = self.memory_model(dummy_input)
-            
             base_params = self.memory_model.variables['params']
             
             weights = {}
