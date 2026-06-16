@@ -338,7 +338,8 @@ def migrate_static_gate_to_dynamic(params):
 - **`routing_optimizer.py`** — `local_attn` добавлен в `partial_updates` select-mask (критический фикс; без него градиенты local_attn не обновлялись бы)
 - **`tests/test_titans_decode.py`** — 4 теста decode-режима
 - **`tests/test_tree_utils.py`** — 4 теста tree utils с local_attn
-- **`colabs/Titans_jax_Phase1_training.ipynb`** — `_ensure_local_attn()` helper + вызов в `FullParamsInit.transform()`: копирует `attn`→`local_attn` для старых чекпойнтов
+- **`titans_ckpts.py`** — `SkipTitans.transform()`: после merge, копирует `attn`→`local_attn` для Titans-слоёв (критический фикс для FIRST_RUN=True, когда `local_attn` инициализируется случайно)
+- **`colabs/Titans_jax_Phase1_training.ipynb`** — `_ensure_local_attn()` helper + вызов в `FullParamsInit.transform()`: копирует `attn`→`local_attn` для старых чекпойнтов при FIRST_RUN=False
 - **`colabs/Titans_jax_Phase2_training.ipynb`** — `adaptive_max_lr` 5e-4 → 3e-4; `lr_adam` 5e-4 → 2e-4 (local_attn берёт часть near-context, поэтому LR снижены)
 
 ---

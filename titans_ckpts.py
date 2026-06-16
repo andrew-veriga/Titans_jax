@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import typing
 from typing import Any, TypeVar, Union
@@ -71,5 +72,16 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
 
     # Restore the Titans weights (titans_ffn, titans_pre_ffw_norm, etc.)
     state = state.replace(params=titans_tree_utils.merge_titans_params(state.params, titans_params))
+
+    # Initialize local_attn from pretrained attn (critical for FIRST_RUN)
+    # At this point, local_attn is random (from titans_tree split), while attn has
+    # real Gemma weights. We overwrite local_attn with attn copy for all Titans layers.
+    # This prevents training divergence caused by frozen random local_attn output.
+    loaded_params = dict(state.params)
+    for key, layer_params in loaded_params.items():
+      if 'layer_' in key and isinstance(layer_params, dict):
+        if 'memory' in layer_params and 'local_attn' in layer_params and 'attn' in layer_params:
+          layer_params['local_attn'] = copy.deepcopy(layer_params['attn'])
+    state = state.replace(params=loaded_params)
 
     return state
