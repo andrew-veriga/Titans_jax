@@ -55,7 +55,7 @@ activations_layer23
 gemma3_1b_ckpt
 phase1_layer_23
 docs/.obsidian
-hist.png
 .gitignore
-hist2.png
 metrics.png
+docs/session.txt
+docs/TODO.md

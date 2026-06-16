@@ -61,11 +61,15 @@ class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
     neural_mem_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
     use_original_attn: bool = False
+    # Phase 1: stop_gradient on local_attn_output to prevent identity shortcut.
+    # Forces memory to be the only trainable path (surprise-gated updates principle).
+    freeze_local_attn: bool = False
 
     def setup(self):
         from gemma.gm.nn import _layers
         self.pre_attention_norm = _layers.RMSNorm()
 
+        # Teacher attention (Phase 1 only): GLOBAL attention for distillation target
         self.attn = None
         if self.use_original_attn:
             self.attn = _modules.Attention(
@@ -81,6 +85,22 @@ class TitansBlock(_modules.Block):
                 sliding_window_size=self.sliding_window_size,
                 use_qk_norm=self.use_qk_norm,
             )
+
+        # LOCAL sliding window attention (always created): near-context for student/inference
+        # This provides exact local attention (window=128) complementing Neural Memory's far-context
+        self.local_attn = _modules.Attention(
+            num_heads=self.num_heads,
+            features=self.embed_dim,
+            head_dim=self.head_dim,
+            num_kv_heads=self.num_kv_heads,
+            attn_type=_modules.AttentionType.LOCAL_SLIDING,
+            query_pre_attn_scalar=self.query_pre_attn_scalar,
+            rope_base_frequency=self.rope_base_frequency,
+            rope_scale_factor=self.rope_scale_factor,
+            attn_logits_soft_cap=self.attn_logits_soft_cap,
+            sliding_window_size=self.sliding_window_size,
+            use_qk_norm=self.use_qk_norm,
+        )
 
         self.post_attention_norm = None
         if self.use_post_attn_norm:
@@ -169,12 +189,29 @@ class TitansBlock(_modules.Block):
             gate = None
         else:
             # 2. Student mode (Phase 1) / Phase 2 / Inference:
-            # Pure Titans memory, NO original Gemma attention
-            
+            # HYBRID: LOCAL Attention (near-context, window=128) + Neural Memory (far-context)
+
             loss_kwargs = {}
             if current_huber_delta is not None:
                 loss_kwargs['delta'] = current_huber_delta
 
+            # LOCAL sliding window attention: exact near-context (window=128)
+            new_attn_cache, local_attn_output = self.local_attn(
+                inputs_normalized,
+                segment_pos,
+                cache,
+                attn_mask,
+            )
+            # Remove memory_state from local_attn's returned cache (managed separately below)
+            if isinstance(new_attn_cache, dict) and 'memory_state' in new_attn_cache:
+                del new_attn_cache['memory_state']
+
+            # Phase 1 freeze: stop_gradient on local_attn_output to prevent identity shortcut.
+            # Forces memory to be the only trainable path (surprise-gated updates principle).
+            if self.freeze_local_attn:
+                local_attn_output = jax.lax.stop_gradient(local_attn_output)
+
+            # Neural Memory: retrieves far-context (returns zeros during decode)
             retrieved, next_mem_state, avg_mem_loss = self.memory(
                 inputs_normalized,
                 memory_state=mem_state,
@@ -183,18 +220,12 @@ class TitansBlock(_modules.Block):
                 loss_kwargs=loss_kwargs,
                 input_mask=input_mask,
             )
-            # Динамический вентиль: вычисляется на основе входного вектора
+            # Dynamic gate: balances local_attn vs memory contribution
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
-            # retrieved = jnp.tanh(retrieved) # O(1), bounds to [-1, 1]
 
-            # ЧИСТАЯ ЗАМЕНА: Оригинальный attn_output больше не прибавляется!
-            combined_output = gate * retrieved
-            
-            # Пробрасываем старый кэш Attention без изменений, чтобы сохранить структуру PyTree
-            new_attn_cache = dict(cache) if cache is not None else {}
-            # Удаляем memory_state из копии attn_cache, так как мы добавим его ниже
-            if 'memory_state' in new_attn_cache:
-                del new_attn_cache['memory_state']
+            # HYBRID COMBINATION: local_attn (near) + gate * memory (far)
+            # During decode: gate * 0 + local_attn = local_attn (clean near-context)
+            combined_output = local_attn_output + gate * retrieved
 
         if self.post_attention_norm is not None:
             combined_output = self.post_attention_norm(combined_output)
@@ -217,18 +248,13 @@ class TitansBlock(_modules.Block):
 
         outputs += combined_output
 
-        # Construct new cache.
-        # During training (cache is None), we include metrics (avg_mem_loss, gate_values)
-        # so _apply_attention can extract them for logging.
-        # During inference (cache provided), we MUST NOT add extra keys — the Sampler's
-        # jax.lax.while_loop requires the cache pytree structure to be identical between
-        # iterations. Extra keys or shape-changing arrays break it.
+        # Construct new cache - ALWAYS return a dict to preserve metrics (gate, loss)
+        # even if input cache was None. Gemma3_1B_Titans._forward handles the 
+        # external 'None' return if needed.
         new_cache = dict(new_attn_cache or {})
         new_cache['memory_state'] = next_mem_state
-        if cache is None:
-            # Training: cache not used for generation, metrics are safe to include
-            new_cache['avg_mem_loss'] = avg_mem_loss
-            new_cache['gate_values'] = gate
+        new_cache['avg_mem_loss'] = avg_mem_loss  # Store memory loss metric in cache
+        new_cache['gate_values'] = gate  # [B, L, embed_dim]
 
         return new_cache, outputs
 
@@ -359,8 +385,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         blocks.append(TitansBlock(
                         **block_kwargs,
                         neural_mem_kwargs=self.config.neural_mem_kwargs,
-
                         use_original_attn=True, # Phase 1 requires Gemma Attention for Teacher
+                        freeze_local_attn=True,  # Phase 1: stop_gradient on local_attn (surprise-gated)
                     ))
                 else:
                     # static_argnums=(5,) marks is_teacher_mode as a compile-time constant.

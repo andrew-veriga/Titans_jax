@@ -116,21 +116,30 @@ def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype=jnp.float32):
     heads = mem.get('heads', 1)
     dim_head = mem.get('dim_head', dim // heads)
     mlp_depth = mem.get('mlp_depth', 2)
-    
+
+    chunk_size = mem.get('chunk_size', 1)
+
     params = {}
     key = jax.random.PRNGKey(0)
-    
+
     # Always use float32 for memory weights to prevent accumulation drift in bfloat16
     for i in range(mlp_depth):
         key, subkey = jax.random.split(key)
         params[f'weight_{i}'] = (
             jax.random.normal(subkey, (batch_size, heads, dim_head, dim_head)) * 0.02
         ).astype(jnp.float32)
-    
+
     initial_weights = params
     momentum = jax.tree_util.tree_map(jnp.zeros_like, initial_weights)
-    
-    return (initial_weights, momentum)
+
+    # Token buffer: pre-allocated (batch, chunk_size, dim) for JAX-static shapes.
+    # Filled sequentially during decode; when full → store_memories + reset.
+    token_buffer = jnp.zeros((batch_size, chunk_size, dim), dtype=dtype)
+
+    # Buffer counter: how many tokens are currently in the buffer (scalar int32).
+    buffer_count = jnp.int32(0)
+
+    return (initial_weights, momentum, token_buffer, buffer_count)
 
 def newton_schulz_norm_matrix(x: jnp.ndarray) -> jnp.ndarray:
     """
@@ -356,7 +365,9 @@ class NeuralMemory(nn.Module):
         seq = seq[:, :round_down_seq_len]
         kv_seq = kv_seq[:, :round_down_seq_len]
 
-        past_weights, past_momentum = past_state
+        # memory_state is now 4-element: (weights, momentum, token_buffer, buffer_count)
+        # store_memories only needs weights and momentum
+        past_weights, past_momentum = past_state[:2]
         
         # adaptive lr, momentum, decay
         adaptive_lr = self.to_adaptive_step(seq)
@@ -597,24 +608,60 @@ class NeuralMemory(nn.Module):
     def __call__(self, seq, memory_state=None, return_next_memories=False, kv_seq=None, loss_kwargs=None, input_mask=None):
         batch, seq_len = seq.shape[:2]
         
-        if seq_len < self.chunk_size:
-            ret = repeat(self.empty_memory_embed, 'd -> b n d', b=batch, n=seq_len)
-            if return_next_memories:
-                # Inference-only path: token-by-token decode has seq_len=1 < chunk_size.
-                # Return 3-tuple to match the store_memories contract; loss is zero
-                # because memory is not updated on sub-chunk sequences.
-                avg_mem_loss = jnp.zeros((batch,), dtype=jnp.float32)
-                return ret, memory_state, avg_mem_loss
-            return ret
-
         if not exists(memory_state):
             memory_state = self.init_state(batch, dtype=seq.dtype)
 
-        updates, next_mem_state, avg_mem_loss = self.store_memories(
+        if seq_len < self.chunk_size:
+            # During decode (seq_len < chunk_size), accumulate tokens in buffer.
+            # Once buffer reaches chunk_size, trigger store_memories and reset.
+            # Always return zeros — retrieval happens during prefill only.
+            past_weights, past_momentum, token_buffer, buffer_count = memory_state
+
+            # Place new tokens into pre-allocated buffer at current count position
+            new_buffer = jax.lax.dynamic_update_slice(
+                token_buffer, seq, (0, buffer_count, 0)
+            )
+            new_count = buffer_count + seq_len
+
+            def _store_and_reset(unused):
+                """Buffer full: process one chunk, reset buffer."""
+                updates, next_mem, _ = self.store_memories(
+                    new_buffer, memory_state, kv_seq=None,
+                    loss_kwargs=loss_kwargs, input_mask=None
+                )
+                next_weights, next_momentum = next_mem
+                zero_buf = jnp.zeros_like(token_buffer)
+                zero_count = jnp.int32(0)
+                return (next_weights, next_momentum, zero_buf, zero_count)
+
+            def _keep_buffer(unused):
+                """Not enough tokens yet, keep accumulating."""
+                return (past_weights, past_momentum, new_buffer, new_count)
+
+            new_memory_state = jax.lax.cond(
+                new_count >= self.chunk_size,
+                _store_and_reset,
+                _keep_buffer,
+                operand=None,
+            )
+
+            # Always return zeros during decode
+            ret = jnp.zeros((batch, seq_len, self.dim), dtype=seq.dtype)
+            if return_next_memories:
+                return ret, new_memory_state
+            return ret
+
+        updates, next_mem_core, avg_mem_loss = self.store_memories(
             seq, memory_state, kv_seq=kv_seq, loss_kwargs=loss_kwargs, input_mask=input_mask
         )
-        
-        past_weights, _ = memory_state
+
+        # store_memories returns (weights, momentum) — wrap back to 4-element state.
+        # Preserve token_buffer and buffer_count from original state.
+        next_weights, next_momentum = next_mem_core
+        _, _, token_buffer, buffer_count = memory_state
+        next_mem_state = (next_weights, next_momentum, token_buffer, buffer_count)
+
+        past_weights, _ = memory_state[:2]
         
         def add_updates(p, u):
             # p: (b, h, ...)

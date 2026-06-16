@@ -36,6 +36,7 @@ def migrate_static_gate_to_dynamic(params: _ParamsDict) -> _ParamsDict:
 _TITANS_KEYS = frozenset({
     'memory', 'memory_gate_proj',
     'titans_ffn', 'titans_pre_ffw_norm', 'titans_post_ffw_norm',
+    'local_attn',  # LOCAL sliding attention — Titans hybrid component
 })
 
 def split_titans_params(params: _ParamsDict) -> SplittedParams:
@@ -110,12 +111,6 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
     return new_tree
 
   merged = _merge_recursive(original, titans)
-  
-  if remove_dead_attn:
-    for layer_name, layer_params in merged.items():
-      if isinstance(layer_params, Mapping) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
-        if 'attn' in layer_params:
-          del layer_params['attn']
 
   # Initialize titans_* parameters from Gemma weights if not present in checkpoint.
   # This allows Titans FFN to start from pretrained Gemma weights instead of random init.
@@ -133,7 +128,21 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
     for gemma_key, titans_key in _TITANS_FROM_GEMMA.items():
       if titans_key not in layer_params and gemma_key in layer_params:
         layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
-           
+
+    # Initialize local_attn from original attn if not present (hybrid architecture)
+    # This gives the LOCAL sliding attention a good starting point from pretrained weights
+    # IMPORTANT: must run BEFORE remove_dead_attn, since that deletes 'attn'
+    if 'local_attn' not in layer_params and 'attn' in layer_params:
+      layer_params['local_attn'] = copy.deepcopy(layer_params['attn'])
+
+  # Now safe to remove dead attn (local_attn already initialized above)
+  if remove_dead_attn:
+    for layer_name, layer_params in merged.items():
+      if isinstance(layer_params, Mapping) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
+        # Remove only the exact 'attn' key (teacher attention), NOT 'local_attn'
+        if 'attn' in layer_params:
+          del layer_params['attn']
+
   return merged
 
 
