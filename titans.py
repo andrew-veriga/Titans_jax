@@ -113,13 +113,19 @@ def huber_loss(pred, target, delta=0.1, **kwargs):
 
 def init_memory_state(batch_size, dim, neural_mem_kwargs, *, dtype=jnp.float32):
     mem = default(neural_mem_kwargs, {})
+    heads = mem.get('heads', 1)
+    dim_head = mem.get('dim_head', dim // heads)
+    mlp_depth = mem.get('mlp_depth', 2)
+
     chunk_size = mem.get('chunk_size', 1)
 
-    # Initial weights and momentum are None here.
-    # They are initialized dynamically inside NeuralMemory.__call__
-    # using the model's actual trained parameters from MemoryMLP.
-    initial_weights = None
-    momentum = None
+    params = {}
+    # Initialize with zeros as a sentinel for dynamic initialization
+    for i in range(mlp_depth):
+        params[f'weight_{i}'] = jnp.zeros((batch_size, heads, dim_head, dim_head), dtype=jnp.float32)
+
+    initial_weights = params
+    momentum = jax.tree_util.tree_map(jnp.zeros_like, initial_weights)
 
     # Token buffer: pre-allocated (batch, chunk_size, dim) for JAX-static shapes.
     # Filled sequentially during decode; when full → store_memories + reset.
@@ -602,25 +608,46 @@ class NeuralMemory(nn.Module):
 
         past_weights, past_momentum, token_buffer, buffer_count = memory_state
 
-        # DYNAMIC INITIALIZATION: If weights are None, initialize them from self.memory_model
-        if past_weights is None:
+        # DYNAMIC INITIALIZATION: If past_weights is fresh (all zeros), initialize from MemoryMLP parameters
+        def get_base_weights(unused):
             # Force parameter initialization for self.memory_model
             dummy_input = jnp.zeros((1, self.dim_head), dtype=seq.dtype)
             _ = self.memory_model(dummy_input)
             
             base_params = self.memory_model.variables['params']
             
-            past_weights = {}
+            weights = {}
             for i in range(self.mlp_depth):
                 w = base_params[f'weight_{i}']  # shape: (dim_head, dim_head)
                 # Broadcast to (batch, heads, dim_head, dim_head)
                 w_bcast = jnp.broadcast_to(w[None, None, ...], (batch, self.heads, self.dim_head, self.dim_head))
-                past_weights[f'weight_{i}'] = w_bcast
-                
-            past_momentum = jax.tree_util.tree_map(jnp.zeros_like, past_weights)
-            
-            # Reconstruct memory_state with the initialized weights
-            memory_state = (past_weights, past_momentum, token_buffer, buffer_count)
+                weights[f'weight_{i}'] = w_bcast
+            return weights
+
+        def get_past_weights(unused):
+            return past_weights
+
+        # Determine if weights are fresh (all zeros) using JAX tracer compatible check
+        is_updated = jnp.any(past_weights['weight_0'] != 0.0)
+        
+        active_weights = jax.lax.cond(
+            is_updated,
+            get_past_weights,
+            get_base_weights,
+            operand=None
+        )
+        
+        # Also initialize momentum to zeros if fresh
+        active_momentum = jax.lax.cond(
+            is_updated,
+            lambda _: past_momentum,
+            lambda _: jax.tree_util.tree_map(jnp.zeros_like, active_weights),
+            operand=None
+        )
+        
+        # Update memory_state local variables with active weights/momentum
+        memory_state = (active_weights, active_momentum, token_buffer, buffer_count)
+        past_weights, past_momentum = active_weights, active_momentum
 
         if seq_len < self.chunk_size:
             # During decode (seq_len < chunk_size), accumulate tokens in buffer.
