@@ -700,6 +700,8 @@ class Layer23Trainer:
                 f"Available: {param_keys}"
             )
         gemma_layer = full_params['params'][gemma_layer_key]
+        import copy
+
         warm_start_keys = [
             'pre_attention_norm', 'post_attention_norm',
             'pre_ffw_norm', 'mlp', 'post_ffw_norm',
@@ -710,6 +712,21 @@ class Layer23Trainer:
                 print(f"   ✓ {k}: loaded from Gemma checkpoint")
             else:
                 print(f"   ⚠ {k}: not found in checkpoint, using random init")
+
+        # Warm-start student parameters from pretrained Gemma equivalents
+        titans_init_map = {
+            'local_attn': 'attn',
+            'titans_ffn': 'mlp',
+            'titans_pre_ffw_norm': 'pre_ffw_norm',
+            'titans_post_ffw_norm': 'post_ffw_norm',
+        }
+        for t_k, g_k in titans_init_map.items():
+            if t_k in titans_params:
+                if g_k in gemma_layer:
+                    titans_params[t_k] = copy.deepcopy(gemma_layer[g_k])
+                    print(f"   ✓ {t_k}: warm-started from Gemma '{g_k}'")
+                else:
+                    print(f"   ⚠ {t_k}: equivalent Gemma '{g_k}' not found in checkpoint, using random init")
 
         self.titans_params = freeze(titans_params)
 

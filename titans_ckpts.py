@@ -82,7 +82,8 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
     # they are in _TITANS_KEYS, so split_titans_params puts them in titans_tree (random),
     # and after merge they already exist → merge_titans_params auto-init does NOT fire.
     # We must explicitly copy from Gemma weights (mlp, pre_ffw_norm, post_ffw_norm).
-    loaded_params = dict(state.params)
+    from flax.core import unfreeze, freeze
+    loaded_params = unfreeze(state.params)
     _TITANS_INIT_MAP = {
         'local_attn': 'attn',
         'titans_ffn': 'mlp',
@@ -97,6 +98,6 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
           for titans_key, gemma_key in _TITANS_INIT_MAP.items():
             if titans_key in layer_params and gemma_key in layer_params:
               layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
-    state = state.replace(params=loaded_params)
+    state = state.replace(params=freeze(loaded_params))
 
     return state

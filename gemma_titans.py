@@ -88,6 +88,8 @@ class TitansBlock(_modules.Block):
 
         # LOCAL sliding window attention (always created): near-context for student/inference
         # This provides exact local attention (window=128) complementing Neural Memory's far-context
+        # Crucial: local attention ALWAYS uses local RoPE frequency (10,000) and scale (1.0),
+        # even if this block is placed on a global layer that uses global RoPE frequency (1,000,000).
         self.local_attn = _modules.Attention(
             num_heads=self.num_heads,
             features=self.embed_dim,
@@ -95,8 +97,8 @@ class TitansBlock(_modules.Block):
             num_kv_heads=self.num_kv_heads,
             attn_type=_modules.AttentionType.LOCAL_SLIDING,
             query_pre_attn_scalar=self.query_pre_attn_scalar,
-            rope_base_frequency=self.rope_base_frequency,
-            rope_scale_factor=self.rope_scale_factor,
+            rope_base_frequency=10000.0,
+            rope_scale_factor=1.0,
             attn_logits_soft_cap=self.attn_logits_soft_cap,
             sliding_window_size=self.sliding_window_size,
             use_qk_norm=self.use_qk_norm,
