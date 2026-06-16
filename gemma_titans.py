@@ -145,15 +145,15 @@ class TitansBlock(_modules.Block):
         # 1152 независимых вентиля
         # ДИНАМИЧЕСКИЙ ВЕНТИЛЬ: вместо статического параметра используем Dense-слой
         # для вычисления важности памяти на основе текущего токена
-        # bias_init=-1.0 → sigmoid(-1) ≈ 0.27: gate изначально "прикрыт"
-        # Память random-init, поэтому открываем gate постепенно по мере обучения memory.
-        # Слишком высокий gate (2.0→0.88) заливал случайный шум memory в выход → loss не снижался.
+        # bias_init=0.0 → sigmoid(0) = 0.5: сбалансированный старт.
+        # Memory вносит 50%, local_attn (Gemma weights) — 50%.
+        # Низкий gate (-1.0→0.27) масштабировал градиенты к memory, замедляя обучение.
         self.memory_gate_proj = flax_nn.Dense(
             features=self.embed_dim, 
             use_bias=True,
             kernel_init=flax_nn.initializers.lecun_normal(),
             # bias_init=flax_nn.initializers.constant(1.0),
-            bias_init=flax_nn.initializers.constant(-1.0),
+            bias_init=flax_nn.initializers.constant(0.0),
             name='memory_gate_proj'
         )
         
@@ -647,10 +647,10 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     else:
                         layer_losses[f"mem_loss_{layer_name}"] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
 
-                     # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
+                     # 3. Layer Loss: Normalized MSE (cosine-like, strong gradients)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
-                    layer_loss = self.cos_by_softmax(delta_teacher, delta_student)  # (B, L)
+                    layer_loss = self.normalized_mse(delta_teacher, delta_student)  # (B, L)
                     # Маскируем паддинг-позиции нулями
                     layer_loss = layer_loss * inputs.inputs_mask.astype(layer_loss.dtype)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
