@@ -157,8 +157,8 @@ def make_routing_optimizer(opt_params: dict):
             mask=kd.optim.select([
                 "memory", "memory_gate_proj", "local_attn",
                 "titans_ffn", "titans_pre_ffw_norm", "titans_post_ffw_norm",
-                # Размораживаем все остальные слои gemma
-                "layer_24", "layer_25", "final_norm"
+                # # Размораживаем все остальные слои gemma
+                # "layer_24", "layer_25", "final_norm"
             ]),
         ),
         every_k_schedule=opt_params["every_k_schedule"],

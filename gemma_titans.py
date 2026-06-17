@@ -97,8 +97,8 @@ class TitansBlock(_modules.Block):
             num_kv_heads=self.num_kv_heads,
             attn_type=_modules.AttentionType.LOCAL_SLIDING,
             query_pre_attn_scalar=self.query_pre_attn_scalar,
-            rope_base_frequency=10000.0,
-            rope_scale_factor=1.0,
+            rope_base_frequency=self.rope_base_frequency,
+            rope_scale_factor=self.rope_scale_factor,
             attn_logits_soft_cap=self.attn_logits_soft_cap,
             sliding_window_size=self.sliding_window_size,
             use_qk_norm=self.use_qk_norm,
@@ -652,7 +652,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                      # 3. Layer Loss: Normalized MSE (cosine-like, strong gradients)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
-                    layer_loss = self.normalized_mse(delta_teacher, delta_student)  # (B, L)
+                    layer_loss = self.distill_mse(delta_teacher, delta_student)  # (B, L)
                     # Маскируем паддинг-позиции нулями
                     layer_loss = layer_loss * inputs.inputs_mask.astype(layer_loss.dtype)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
@@ -765,6 +765,14 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         # SUM по D, keep L — сохраняет масштаб, форма (B, L) для маскирования паддинга
         raw_diff = (ds_norm - dt_norm) ** 2
         layer_loss = jnp.sum(raw_diff, axis=-1)  # (B, L)
+        return layer_loss
+
+    def distill_mse(self, delta_teacher, delta_student):
+        """
+        Standard MSE for feature distillation (no normalization to prevent vanishing gradients).
+        """
+        raw_diff = (delta_student - delta_teacher) ** 2
+        layer_loss = jnp.mean(raw_diff, axis=-1)  # (B, L)
         return layer_loss
 
     def init_cache(
