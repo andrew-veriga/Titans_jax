@@ -54,34 +54,20 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
     state = state.replace(params=original_params)
     state = self.wrapped.transform(state)
 
-    # ── Clean up injected dummy structures ──
-    if injected_attn_layers or injected_ffn_layers:
-      loaded_params = dict(state.params)
-      for key in injected_attn_layers:
-        if key in loaded_params and 'attn' in loaded_params[key]:
-          layer_params = dict(loaded_params[key])
-          del layer_params['attn']
-          loaded_params[key] = layer_params
-      for key in injected_ffn_layers:
-        if key in loaded_params:
-          layer_params = dict(loaded_params[key])
-          for ffn_key in ('mlp', 'pre_ffw_norm', 'post_ffw_norm'):
-            layer_params.pop(ffn_key, None)
-          loaded_params[key] = layer_params
-      state = state.replace(params=loaded_params)
-
-    # Restore the Titans weights (titans_ffn, titans_pre_ffw_norm, etc.)
+    # ── CRITICAL: Merge titans params BEFORE cleanup ──
+    # We must merge titans_params back first, so that titans_ffn exists in the tree.
+    # Then we copy Gemma weights (mlp, pre_ffw_norm, etc.) into titans_ffn, etc.
+    # Only AFTER that can we clean up the injected dummy structures.
     state = state.replace(params=titans_tree_utils.merge_titans_params(state.params, titans_params))
 
-    # Initialize local_attn from pretrained attn (critical for FIRST_RUN)
-    # At this point, local_attn is random (from titans_tree split), while attn has
-    # real Gemma weights. We overwrite local_attn with attn copy for all Titans layers.
-    # This prevents training divergence caused by frozen random local_attn output.
-    #
-    # Same issue applies to titans_ffn, titans_pre_ffw_norm, titans_post_ffw_norm:
-    # they are in _TITANS_KEYS, so split_titans_params puts them in titans_tree (random),
-    # and after merge they already exist → merge_titans_params auto-init does NOT fire.
-    # We must explicitly copy from Gemma weights (mlp, pre_ffw_norm, post_ffw_norm).
+    # ── CRITICAL: Initialize Titans components from Gemma weights BEFORE cleanup ──
+    # At this point:
+    #   - local_attn is random (from titans_tree split)
+    #   - titans_ffn is random (from titans_tree split)
+    #   - attn has real Gemma weights (from checkpoint)
+    #   - mlp/pre_ffw_norm/post_ffw_norm have real Gemma weights (still available!)
+    # We copy Gemma weights into Titans components so they start from a good point.
+    # This MUST happen before cleanup (which removes mlp, pre_ffw_norm, etc.)
     from flax.core import unfreeze, freeze
     loaded_params = unfreeze(state.params)
     _TITANS_INIT_MAP = {
@@ -96,8 +82,27 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
         is_titans = 'memory' in layer_params or 'memory_gate_proj' in layer_params
         if is_titans:
           for titans_key, gemma_key in _TITANS_INIT_MAP.items():
+            # titans_key may not exist in Phase 1 (conditional creation).
+            # gemma_key may not exist in non-standard layers.
             if titans_key in layer_params and gemma_key in layer_params:
               layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
     state = state.replace(params=freeze(loaded_params))
+
+    # ── Clean up injected dummy structures (AFTER titans init) ──
+    # Now safe to remove mlp, pre_ffw_norm, post_ffw_norm, attn from Titans layers.
+    if injected_attn_layers or injected_ffn_layers:
+      loaded_params = unfreeze(state.params)
+      for key in injected_attn_layers:
+        if key in loaded_params and 'attn' in loaded_params[key]:
+          layer_params = dict(loaded_params[key])
+          del layer_params['attn']
+          loaded_params[key] = layer_params
+      for key in injected_ffn_layers:
+        if key in loaded_params:
+          layer_params = dict(loaded_params[key])
+          for ffn_key in ('mlp', 'pre_ffw_norm', 'post_ffw_norm'):
+            layer_params.pop(ffn_key, None)
+          loaded_params[key] = layer_params
+      state = state.replace(params=freeze(loaded_params))
 
     return state

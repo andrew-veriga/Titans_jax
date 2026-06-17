@@ -108,9 +108,12 @@ class TitansBlock(_modules.Block):
         if self.use_post_attn_norm:
             self.post_attention_norm = _layers.RMSNorm()
 
-        # ── Teacher FFN (Phase 1 only): loaded from Gemma checkpoint, frozen ──
-        # Created only when use_original_attn=True (Phase 1).
-        # Phase 2 does not create these → no Gemma weights needed for Titans layers.
+        # ── FFN: Phase-dependent creation ──
+        # Phase 1 (use_original_attn=True): both teacher AND student use Gemma FFN (frozen).
+        #   This prevents gradient leak through titans_ffn — the main cause of Phase 1 plateau.
+        #   mlp/pre_ffw_norm/post_ffw_norm are NOT in partial_updates → frozen.
+        # Phase 2/Inference (use_original_attn=False): student uses titans_ffn (trainable in Phase 2,
+        #   warm-started from Gemma mlp via titans_ckpts.py).
         if self.use_original_attn:
             self.pre_ffw_norm = _layers.RMSNorm()
             self.mlp = _modules.FeedForward(
@@ -121,17 +124,16 @@ class TitansBlock(_modules.Block):
             self.post_ffw_norm = None
             if self.use_post_ffw_norm:
                 self.post_ffw_norm = _layers.RMSNorm()
-
-        # ── Student FFN (all phases): randomly initialized, trainable ──
-        self.titans_pre_ffw_norm = _layers.RMSNorm()
-        self.titans_ffn = _modules.FeedForward(
-            features=self.embed_dim,
-            hidden_dim=self.hidden_dim,
-            transpose_gating_einsum=self.transpose_gating_einsum,
-        )
-        self.titans_post_ffw_norm = None
-        if self.use_post_ffw_norm:
-            self.titans_post_ffw_norm = _layers.RMSNorm()
+        else:
+            self.titans_pre_ffw_norm = _layers.RMSNorm()
+            self.titans_ffn = _modules.FeedForward(
+                features=self.embed_dim,
+                hidden_dim=self.hidden_dim,
+                transpose_gating_einsum=self.transpose_gating_einsum,
+            )
+            self.titans_post_ffw_norm = None
+            if self.use_post_ffw_norm:
+                self.titans_post_ffw_norm = _layers.RMSNorm()
 
         mem_kwargs = dict(self.neural_mem_kwargs or {})
         self.diff_view = mem_kwargs.get('diff_view', False)
@@ -227,6 +229,9 @@ class TitansBlock(_modules.Block):
             # Dynamic gate: balances local_attn vs memory contribution
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
 
+            # Bound retrieved to [-1, 1] for numerical stability (as in d3b801e working version)
+            retrieved = jnp.tanh(retrieved)
+
             # HYBRID COMBINATION: local_attn (near) + gate * memory (far)
             # During decode: gate * 0 + local_attn = local_attn (clean near-context)
             combined_output = local_attn_output + gate * retrieved
@@ -236,15 +241,19 @@ class TitansBlock(_modules.Block):
 
         combined_output += x
 
-        # 3. FFN Branch: Teacher uses Gemma FFN (frozen), Student uses Titans FFN (trainable)
-        if is_teacher_mode and self.use_original_attn:
-            # Teacher (Phase 1): use Gemma FFN loaded from checkpoint
+        # 3. FFN Branch: Phase-dependent
+        # Phase 1 (use_original_attn=True): both teacher AND student use frozen Gemma FFN.
+        #   This is CRITICAL: prevents gradient leak through titans_ffn that caused Phase 1 plateau.
+        #   Memory is the only trainable path in student (surprise-gated updates principle).
+        # Phase 2/Inference (use_original_attn=False): student uses trainable titans_ffn.
+        if self.use_original_attn:
+            # Phase 1: Gemma FFN (frozen — not in partial_updates)
             outputs = self.pre_ffw_norm(combined_output)
             outputs = self.mlp(outputs)
             if self.post_ffw_norm is not None:
                 outputs = self.post_ffw_norm(outputs)
         else:
-            # Student (Phase 1/2/Inference): use trainable Titans FFN
+            # Phase 2/Inference: titans_ffn (trainable in Phase 2)
             outputs = self.titans_pre_ffw_norm(combined_output)
             outputs = self.titans_ffn(outputs)
             if self.titans_post_ffw_norm is not None:
@@ -649,10 +658,11 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     else:
                         layer_losses[f"mem_loss_{layer_name}"] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
 
-                     # 3. Layer Loss: Normalized MSE (cosine-like, strong gradients)
+                    # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
+                    # cos_by_softmax was used in working d3b801e version
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
-                    layer_loss = self.distill_mse(delta_teacher, delta_student)  # (B, L)
+                    layer_loss = self.cos_by_softmax(delta_teacher, delta_student)  # (B, L)
                     # Маскируем паддинг-позиции нулями
                     layer_loss = layer_loss * inputs.inputs_mask.astype(layer_loss.dtype)
                     layer_losses[f"loss_{layer_name}"] = layer_loss 
