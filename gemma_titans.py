@@ -195,27 +195,10 @@ class TitansBlock(_modules.Block):
             gate = None
         else:
             # 2. Student mode (Phase 1) / Phase 2 / Inference:
-            # HYBRID: LOCAL Attention (near-context, window=128) + Neural Memory (far-context)
 
             loss_kwargs = {}
             if current_huber_delta is not None:
                 loss_kwargs['delta'] = current_huber_delta
-
-            # LOCAL sliding window attention: exact near-context (window=128)
-            new_attn_cache, local_attn_output = self.local_attn(
-                inputs_normalized,
-                segment_pos,
-                cache,
-                attn_mask,
-            )
-            # Remove memory_state from local_attn's returned cache (managed separately below)
-            if isinstance(new_attn_cache, dict) and 'memory_state' in new_attn_cache:
-                del new_attn_cache['memory_state']
-
-            # Phase 1 freeze: stop_gradient on local_attn_output to prevent identity shortcut.
-            # Forces memory to be the only trainable path (surprise-gated updates principle).
-            if self.freeze_local_attn:
-                local_attn_output = jax.lax.stop_gradient(local_attn_output)
 
             # Neural Memory: retrieves far-context (returns zeros during decode)
             retrieved, next_mem_state, avg_mem_loss = self.memory(
@@ -226,15 +209,32 @@ class TitansBlock(_modules.Block):
                 loss_kwargs=loss_kwargs,
                 input_mask=input_mask,
             )
-            # Dynamic gate: balances local_attn vs memory contribution
+            # Dynamic gate
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
 
             # Bound retrieved to [-1, 1] for numerical stability (as in d3b801e working version)
             retrieved = jnp.tanh(retrieved)
 
-            # HYBRID COMBINATION: local_attn (near) + gate * memory (far)
-            # During decode: gate * 0 + local_attn = local_attn (clean near-context)
-            combined_output = local_attn_output + gate * retrieved
+            if self.use_original_attn:
+                # Phase 1: PURE MEMORY (as in d3b801e) — no local_attn.
+                # local_attn saturates cos_by_softmax, killing gradients to memory.
+                # Memory must be the ONLY trainable path in student.
+                combined_output = gate * retrieved
+                # Pass through cache unchanged
+                new_attn_cache = dict(cache) if cache is not None else {}
+                if 'memory_state' in new_attn_cache:
+                    del new_attn_cache['memory_state']
+            else:
+                # Phase 2 / Inference: MAG hybrid — local_attn (near) + memory (far)
+                new_attn_cache, local_attn_output = self.local_attn(
+                    inputs_normalized,
+                    segment_pos,
+                    cache,
+                    attn_mask,
+                )
+                if isinstance(new_attn_cache, dict) and 'memory_state' in new_attn_cache:
+                    del new_attn_cache['memory_state']
+                combined_output = local_attn_output + gate * retrieved
 
         if self.post_attention_norm is not None:
             combined_output = self.post_attention_norm(combined_output)
