@@ -61,15 +61,11 @@ class TitansBlock(_modules.Block):
     """Gemma Block with integrated Titans Neural Long-Term Memory (NLTM)."""
     neural_mem_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
     use_original_attn: bool = False
-    # Phase 1: stop_gradient on local_attn_output to prevent identity shortcut.
-    # Forces memory to be the only trainable path (surprise-gated updates principle).
-    freeze_local_attn: bool = False
 
     def setup(self):
         from gemma.gm.nn import _layers
         self.pre_attention_norm = _layers.RMSNorm()
 
-        # Teacher attention (Phase 1 only): GLOBAL attention for distillation target
         self.attn = None
         if self.use_original_attn:
             self.attn = _modules.Attention(
@@ -86,54 +82,21 @@ class TitansBlock(_modules.Block):
                 use_qk_norm=self.use_qk_norm,
             )
 
-        # LOCAL sliding window attention (always created): near-context for student/inference
-        # This provides exact local attention (window=128) complementing Neural Memory's far-context
-        # Crucial: local attention ALWAYS uses local RoPE frequency (10,000) and scale (1.0),
-        # even if this block is placed on a global layer that uses global RoPE frequency (1,000,000).
-        self.local_attn = _modules.Attention(
-            num_heads=self.num_heads,
-            features=self.embed_dim,
-            head_dim=self.head_dim,
-            num_kv_heads=self.num_kv_heads,
-            attn_type=_modules.AttentionType.LOCAL_SLIDING,
-            query_pre_attn_scalar=self.query_pre_attn_scalar,
-            rope_base_frequency=self.rope_base_frequency,
-            rope_scale_factor=self.rope_scale_factor,
-            attn_logits_soft_cap=self.attn_logits_soft_cap,
-            sliding_window_size=self.sliding_window_size,
-            use_qk_norm=self.use_qk_norm,
-        )
-
         self.post_attention_norm = None
         if self.use_post_attn_norm:
             self.post_attention_norm = _layers.RMSNorm()
 
-        # ── FFN: Phase-dependent creation ──
-        # Phase 1 (use_original_attn=True): both teacher AND student use Gemma FFN (frozen).
-        #   This prevents gradient leak through titans_ffn — the main cause of Phase 1 plateau.
-        #   mlp/pre_ffw_norm/post_ffw_norm are NOT in partial_updates → frozen.
-        # Phase 2/Inference (use_original_attn=False): student uses titans_ffn (trainable in Phase 2,
-        #   warm-started from Gemma mlp via titans_ckpts.py).
-        if self.use_original_attn:
-            self.pre_ffw_norm = _layers.RMSNorm()
-            self.mlp = _modules.FeedForward(
-                features=self.embed_dim,
-                hidden_dim=self.hidden_dim,
-                transpose_gating_einsum=self.transpose_gating_einsum,
-            )
-            self.post_ffw_norm = None
-            if self.use_post_ffw_norm:
-                self.post_ffw_norm = _layers.RMSNorm()
-        else:
-            self.titans_pre_ffw_norm = _layers.RMSNorm()
-            self.titans_ffn = _modules.FeedForward(
-                features=self.embed_dim,
-                hidden_dim=self.hidden_dim,
-                transpose_gating_einsum=self.transpose_gating_einsum,
-            )
-            self.titans_post_ffw_norm = None
-            if self.use_post_ffw_norm:
-                self.titans_post_ffw_norm = _layers.RMSNorm()
+        self.pre_ffw_norm = _layers.RMSNorm()
+
+        self.mlp = _modules.FeedForward(
+            features=self.embed_dim,
+            hidden_dim=self.hidden_dim,
+            transpose_gating_einsum=self.transpose_gating_einsum,
+        )
+
+        self.post_ffw_norm = None
+        if self.use_post_ffw_norm:
+            self.post_ffw_norm = _layers.RMSNorm()
 
         mem_kwargs = dict(self.neural_mem_kwargs or {})
         self.diff_view = mem_kwargs.get('diff_view', False)
@@ -149,15 +112,13 @@ class TitansBlock(_modules.Block):
         # 1152 независимых вентиля
         # ДИНАМИЧЕСКИЙ ВЕНТИЛЬ: вместо статического параметра используем Dense-слой
         # для вычисления важности памяти на основе текущего токена
-        # bias_init=0.0 → sigmoid(0) = 0.5: сбалансированный старт.
-        # Memory вносит 50%, local_attn (Gemma weights) — 50%.
-        # Низкий gate (-1.0→0.27) масштабировал градиенты к memory, замедляя обучение.
+        # bias_init=+2.0 → sigmoid(2) ≈ 0.88: gate изначально "открыт"
         self.memory_gate_proj = flax_nn.Dense(
             features=self.embed_dim, 
             use_bias=True,
             kernel_init=flax_nn.initializers.lecun_normal(),
             # bias_init=flax_nn.initializers.constant(1.0),
-            bias_init=flax_nn.initializers.constant(0.0),
+            bias_init=flax_nn.initializers.constant(2.0),
             name='memory_gate_proj'
         )
         
@@ -195,12 +156,12 @@ class TitansBlock(_modules.Block):
             gate = None
         else:
             # 2. Student mode (Phase 1) / Phase 2 / Inference:
-
+            # Pure Titans memory, NO original Gemma attention
+            
             loss_kwargs = {}
             if current_huber_delta is not None:
                 loss_kwargs['delta'] = current_huber_delta
 
-            # Neural Memory: retrieves far-context (returns zeros during decode)
             retrieved, next_mem_state, avg_mem_loss = self.memory(
                 inputs_normalized,
                 memory_state=mem_state,
@@ -209,55 +170,30 @@ class TitansBlock(_modules.Block):
                 loss_kwargs=loss_kwargs,
                 input_mask=input_mask,
             )
-            # Dynamic gate
+            # Динамический вентиль: вычисляется на основе входного вектора
             gate = jax.nn.sigmoid(jnp.clip(self.memory_gate_proj(inputs_normalized), -10.0, 10.0))
+            retrieved = jnp.tanh(retrieved) # O(1), bounds to [-1, 1]
 
-            # Bound retrieved to [-1, 1] for numerical stability (as in d3b801e working version)
-            retrieved = jnp.tanh(retrieved)
-
-            if self.use_original_attn:
-                # Phase 1: PURE MEMORY (as in d3b801e) — no local_attn.
-                # local_attn saturates cos_by_softmax, killing gradients to memory.
-                # Memory must be the ONLY trainable path in student.
-                combined_output = gate * retrieved
-                # Pass through cache unchanged
-                new_attn_cache = dict(cache) if cache is not None else {}
-                if 'memory_state' in new_attn_cache:
-                    del new_attn_cache['memory_state']
-            else:
-                # Phase 2 / Inference: MAG hybrid — local_attn (near) + memory (far)
-                new_attn_cache, local_attn_output = self.local_attn(
-                    inputs_normalized,
-                    segment_pos,
-                    cache,
-                    attn_mask,
-                )
-                if isinstance(new_attn_cache, dict) and 'memory_state' in new_attn_cache:
-                    del new_attn_cache['memory_state']
-                combined_output = local_attn_output + gate * retrieved
+            # ЧИСТАЯ ЗАМЕНА: Оригинальный attn_output больше не прибавляется!
+            combined_output = gate * retrieved
+            
+            # Пробрасываем старый кэш Attention без изменений, чтобы сохранить структуру PyTree
+            new_attn_cache = dict(cache) if cache is not None else {}
+            # Удаляем memory_state из копии attn_cache, так как мы добавим его ниже
+            if 'memory_state' in new_attn_cache:
+                del new_attn_cache['memory_state']
 
         if self.post_attention_norm is not None:
             combined_output = self.post_attention_norm(combined_output)
 
         combined_output += x
 
-        # 3. FFN Branch: Phase-dependent
-        # Phase 1 (use_original_attn=True): both teacher AND student use frozen Gemma FFN.
-        #   This is CRITICAL: prevents gradient leak through titans_ffn that caused Phase 1 plateau.
-        #   Memory is the only trainable path in student (surprise-gated updates principle).
-        # Phase 2/Inference (use_original_attn=False): student uses trainable titans_ffn.
-        if self.use_original_attn:
-            # Phase 1: Gemma FFN (frozen — not in partial_updates)
-            outputs = self.pre_ffw_norm(combined_output)
-            outputs = self.mlp(outputs)
-            if self.post_ffw_norm is not None:
-                outputs = self.post_ffw_norm(outputs)
-        else:
-            # Phase 2/Inference: titans_ffn (trainable in Phase 2)
-            outputs = self.titans_pre_ffw_norm(combined_output)
-            outputs = self.titans_ffn(outputs)
-            if self.titans_post_ffw_norm is not None:
-                outputs = self.titans_post_ffw_norm(outputs)
+        # 3. MLP Branch
+        outputs = self.pre_ffw_norm(combined_output)
+        outputs = self.mlp(outputs)
+
+        if self.post_ffw_norm is not None:
+            outputs = self.post_ffw_norm(outputs)
 
         outputs += combined_output
 
@@ -295,10 +231,7 @@ class Gemma_Titans_Config(_config.TransformerConfig):
             # store_memory_loss_fn auto-selected by NeuralMemory.setup():
             #   huber_loss_delta is not None → huber_loss
             #   huber_loss_delta is None      → default_loss_fn (MSE)
-        },
-        # Exclude from __hash__: dict is unhashable, which breaks Flax module hashing
-        # (required by @flax_nn.jit on __call__). Safe at inference (single config per session).
-        hash=False,
+        }
     )
 
     is_training_mode: bool = True
@@ -398,8 +331,8 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                         blocks.append(TitansBlock(
                         **block_kwargs,
                         neural_mem_kwargs=self.config.neural_mem_kwargs,
+
                         use_original_attn=True, # Phase 1 requires Gemma Attention for Teacher
-                        freeze_local_attn=True,  # Phase 1: stop_gradient on local_attn (surprise-gated)
                     ))
                 else:
                     # static_argnums=(5,) marks is_teacher_mode as a compile-time constant.
@@ -658,8 +591,7 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
                     else:
                         layer_losses[f"mem_loss_{layer_name}"] = jnp.zeros((x.shape[0],), dtype=jnp.float32)
 
-                    # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
-                    # cos_by_softmax was used in working d3b801e version
+                     # 3. Layer Loss: Scaled Dot Product (fused cosine-like)
                     delta_teacher = jax.lax.stop_gradient(out_teacher - x)
                     delta_student = out_student - x
                     layer_loss = self.cos_by_softmax(delta_teacher, delta_student)  # (B, L)
@@ -772,17 +704,9 @@ class Gemma3_1B_Titans(_gemma.Gemma3_1B):
         dt_norm = delta_teacher * inv_norm_t
         ds_norm = delta_student * inv_norm_s
                             
-        # SUM по D, keep L — сохраняет масштаб, форма (B, L) для маскирования паддинга
+        # SUM по D, MEAN по токенам — сохраняет масштаб
         raw_diff = (ds_norm - dt_norm) ** 2
-        layer_loss = jnp.sum(raw_diff, axis=-1)  # (B, L)
-        return layer_loss
-
-    def distill_mse(self, delta_teacher, delta_student):
-        """
-        Standard MSE for feature distillation (no normalization to prevent vanishing gradients).
-        """
-        raw_diff = (delta_student - delta_teacher) ** 2
-        layer_loss = jnp.mean(raw_diff, axis=-1)  # (B, L)
+        layer_loss = jnp.mean(jnp.sum(raw_diff, axis=-1), axis=-1)  # (B,)
         return layer_loss
 
     def init_cache(

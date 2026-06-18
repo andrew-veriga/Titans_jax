@@ -1,5 +1,4 @@
 from __future__ import annotations
-import copy
 from typing import Any, NamedTuple
 from collections.abc import Mapping
 
@@ -31,29 +30,21 @@ def migrate_static_gate_to_dynamic(params: _ParamsDict) -> _ParamsDict:
       new_params[key] = value
   return new_params
 
-# Keys that belong to the Titans-specific parts of a TitansBlock
-# (not present in the original Gemma Block).
-_TITANS_KEYS = frozenset({
-    'memory', 'memory_gate_proj',
-    'titans_ffn', 'titans_pre_ffw_norm', 'titans_post_ffw_norm',
-    'local_attn',  # LOCAL sliding attention — Titans hybrid component
-})
-
 def split_titans_params(params: _ParamsDict) -> SplittedParams:
-  """Split a nested tree into 2 trees, one with and without Titans-specific branches."""
+  """Split a nested tree into 2 trees, one with and without 'memory' and 'memory_gate_proj' branches."""
   original_tree = {}
   titans_tree = {}
 
   def _split_recursive(input_subtree, original_subtree, titans_subtree):
     for key, value in input_subtree.items():
       if isinstance(value, Mapping):
-        if key in _TITANS_KEYS:
+        if key in ('memory', 'memory_gate_proj'):
           titans_subtree[key] = value
         else:
           original_subtree[key] = {}
           titans_subtree[key] = {}
           _split_recursive(value, original_subtree[key], titans_subtree[key])
-      elif key in _TITANS_KEYS:
+      elif key in ('memory', 'memory_gate_proj'):
         titans_subtree[key] = value
       else:
         original_subtree[key] = value
@@ -111,38 +102,13 @@ def merge_titans_params(original: _ParamsDict, titans: _ParamsDict, remove_dead_
     return new_tree
 
   merged = _merge_recursive(original, titans)
-
-  # Initialize titans_* parameters from Gemma weights if not present in checkpoint.
-  # This allows Titans FFN to start from pretrained Gemma weights instead of random init.
-  _TITANS_FROM_GEMMA = {
-      'mlp': 'titans_ffn',
-      'pre_ffw_norm': 'titans_pre_ffw_norm',
-      'post_ffw_norm': 'titans_post_ffw_norm',
-  }
-  for layer_name, layer_params in merged.items():
-    if not isinstance(layer_params, Mapping):
-      continue
-    # Only process Titans layers (those with memory or memory_gate_proj)
-    if 'memory' not in layer_params and 'memory_gate_proj' not in layer_params:
-      continue
-    for gemma_key, titans_key in _TITANS_FROM_GEMMA.items():
-      if titans_key not in layer_params and gemma_key in layer_params:
-        layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
-
-    # Initialize local_attn from original attn if not present (hybrid architecture)
-    # This gives the LOCAL sliding attention a good starting point from pretrained weights
-    # IMPORTANT: must run BEFORE remove_dead_attn, since that deletes 'attn'
-    if 'local_attn' not in layer_params and 'attn' in layer_params:
-      layer_params['local_attn'] = copy.deepcopy(layer_params['attn'])
-
-  # Now safe to remove dead attn (local_attn already initialized above)
+  
   if remove_dead_attn:
     for layer_name, layer_params in merged.items():
       if isinstance(layer_params, Mapping) and ('memory' in layer_params or 'memory_gate_proj' in layer_params):
-        # Remove only the exact 'attn' key (teacher attention), NOT 'local_attn'
         if 'attn' in layer_params:
           del layer_params['attn']
-
+           
   return merged
 
 

@@ -1,4 +1,3 @@
-import copy
 import dataclasses
 import typing
 from typing import Any, TypeVar, Union
@@ -25,84 +24,35 @@ class SkipTitans(kd.ckpts.PartialKauldronLoader):
     original_params, titans_params = titans_tree_utils.split_titans_params(state.params)
 
     injected_attn_layers = []
-    injected_ffn_layers = []
-
-    # ── Collect reference structures from a non-Titans Gemma layer ──
-    ref_attn = None
-    ref_ffn = {}  # {'mlp': ..., 'pre_ffw_norm': ..., 'post_ffw_norm': ...}
-    for key, layer_params in original_params.items():
-      if 'layer_' in key and isinstance(layer_params, dict):
-        if 'attn' in layer_params and ref_attn is None:
+    if self.ignore_checkpoint_attn:
+      # Inject dummy attn structure so that orbax doesn't fail when loading base Gemma checkpoint
+      # Find a normal layer to copy the attn structure from
+      ref_attn = None
+      for key, layer_params in original_params.items():
+        if 'layer_' in key and 'attn' in layer_params:
           ref_attn = layer_params['attn']
-        for ffn_key in ('mlp', 'pre_ffw_norm', 'post_ffw_norm'):
-          if ffn_key in layer_params and ffn_key not in ref_ffn:
-            ref_ffn[ffn_key] = layer_params[ffn_key]
-
-    # ── Inject dummy structures so Orbax can match the Gemma checkpoint ──
-    for key, layer_params in original_params.items():
-      if 'layer_' in key and isinstance(layer_params, dict):
-        # Inject attn if missing (Phase 2 Titans layers without attention)
-        if self.ignore_checkpoint_attn and 'attn' not in layer_params and ref_attn is not None:
-          layer_params['attn'] = ref_attn
-          injected_attn_layers.append(key)
-        # Inject FFN if missing (Titans layers use titans_ffn instead of mlp)
-        if 'mlp' not in layer_params and ref_ffn:
-          for ffn_key, ffn_val in ref_ffn.items():
-            layer_params[ffn_key] = ffn_val
-          injected_ffn_layers.append(key)
+          break
+      
+      if ref_attn is not None:
+        for key, layer_params in original_params.items():
+          if 'layer_' in key and 'attn' not in layer_params:
+            layer_params['attn'] = ref_attn
+            injected_attn_layers.append(key)
 
     state = state.replace(params=original_params)
+
     state = self.wrapped.transform(state)
 
-    # ── CRITICAL: Merge titans params BEFORE cleanup ──
-    # We must merge titans_params back first, so that titans_ffn exists in the tree.
-    # Then we copy Gemma weights (mlp, pre_ffw_norm, etc.) into titans_ffn, etc.
-    # Only AFTER that can we clean up the injected dummy structures.
-    state = state.replace(params=titans_tree_utils.merge_titans_params(state.params, titans_params))
-
-    # ── CRITICAL: Initialize Titans components from Gemma weights BEFORE cleanup ──
-    # At this point:
-    #   - local_attn is random (from titans_tree split)
-    #   - titans_ffn is random (from titans_tree split)
-    #   - attn has real Gemma weights (from checkpoint)
-    #   - mlp/pre_ffw_norm/post_ffw_norm have real Gemma weights (still available!)
-    # We copy Gemma weights into Titans components so they start from a good point.
-    # This MUST happen before cleanup (which removes mlp, pre_ffw_norm, etc.)
-    from flax.core import unfreeze, freeze
-    loaded_params = unfreeze(state.params)
-    _TITANS_INIT_MAP = {
-        'local_attn': 'attn',
-        'titans_ffn': 'mlp',
-        'titans_pre_ffw_norm': 'pre_ffw_norm',
-        'titans_post_ffw_norm': 'post_ffw_norm',
-    }
-    for key, layer_params in loaded_params.items():
-      if 'layer_' in key and isinstance(layer_params, dict):
-        # Only process Titans layers (have 'memory' or 'memory_gate_proj')
-        is_titans = 'memory' in layer_params or 'memory_gate_proj' in layer_params
-        if is_titans:
-          for titans_key, gemma_key in _TITANS_INIT_MAP.items():
-            # titans_key may not exist in Phase 1 (conditional creation).
-            # gemma_key may not exist in non-standard layers.
-            if titans_key in layer_params and gemma_key in layer_params:
-              layer_params[titans_key] = copy.deepcopy(layer_params[gemma_key])
-    state = state.replace(params=freeze(loaded_params))
-
-    # ── Clean up injected dummy structures (AFTER titans init) ──
-    # Now safe to remove mlp, pre_ffw_norm, post_ffw_norm, attn from Titans layers.
-    if injected_attn_layers or injected_ffn_layers:
-      loaded_params = unfreeze(state.params)
+    if injected_attn_layers:
+      loaded_params = dict(state.params)
       for key in injected_attn_layers:
-        if key in loaded_params and 'attn' in loaded_params[key]:
+        if 'attn' in loaded_params[key]:
           layer_params = dict(loaded_params[key])
           del layer_params['attn']
           loaded_params[key] = layer_params
-      for key in injected_ffn_layers:
-        if key in loaded_params:
-          layer_params = dict(loaded_params[key])
-          for ffn_key in ('mlp', 'pre_ffw_norm', 'post_ffw_norm'):
-            layer_params.pop(ffn_key, None)
-          loaded_params[key] = layer_params
-      state = state.replace(params=freeze(loaded_params))
+      state = state.replace(params=loaded_params)
+
+    # Restore the Titans weights
+    state = state.replace(params=titans_tree_utils.merge_titans_params(state.params, titans_params))
 
     return state

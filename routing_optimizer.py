@@ -155,10 +155,9 @@ def make_routing_optimizer(opt_params: dict):
         kd.optim.partial_updates(
             inner_chain,
             mask=kd.optim.select([
-                "memory", "memory_gate_proj", "local_attn",
-                "titans_ffn", "titans_pre_ffw_norm", "titans_post_ffw_norm",
-                # # Размораживаем все остальные слои gemma
-                # "layer_24", "layer_25", "final_norm"
+                "memory", "memory_gate_proj",
+                # Phase 1: only memory and gate are trainable (as in d3b801e)
+                # local_attn, titans_ffn, etc. are either not created or not used in Phase 1
             ]),
         ),
         every_k_schedule=opt_params["every_k_schedule"],
